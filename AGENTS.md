@@ -41,19 +41,22 @@ g/
 │   ├── types.ts                全局共享类型（ModelRef / Message / TextContent）
 │   ├── agent/                  唯一的调度状态机
 │   │   ├── agent.ts              外层 enqueue + 内层 model↔tool 循环
-│   │   └── convert.ts            Anthropic ⇄ 内部消息互转
+│   │   ├── convert.ts            Anthropic ⇄ 内部消息互转
+│   │   └── doc/                  子模块文档（README.md）
 │   ├── context/                模型真正看到的那份上下文
 │   │   ├── index.ts              统一出口，引用方只认这里
 │   │   ├── state.ts              会话状态 + 会话树（节点 / ★ / 分支）、token 与 usage
 │   │   ├── transform.ts          transformContext：清理→压缩→裁剪
-│   │   └── queue.ts              MessageQueue（中途指令合并）
+│   │   ├── queue.ts              MessageQueue（中途指令合并）
+│   │   └── doc/                  子模块文档（README.md）
 │   ├── providers/              模型适配器（缺 key 自动降级 mock）
 │   │   ├── stream.ts             StreamAccumulator（流式 → 完整消息）
 │   │   ├── types.ts              StreamEvent / StreamFn / JsonSchema
 │   │   ├── openai.ts             OpenAI 兼容，BASE_URL 可覆写
 │   │   ├── anthropic.ts          Anthropic API
 │   │   ├── mock.ts               离线测试与 print 模式
-│   │   └── index.ts              resolveModel + providers 表
+│   │   ├── index.ts              resolveModel + providers 表
+│   │   └── doc/                  子模块文档（README.md）
 │   ├── tools/                  6 个内置工具
 │   │   ├── types.ts              Tool 接口 + ok() / fail()
 │   │   ├── validate.ts           JSON Schema 参数校验
@@ -65,12 +68,15 @@ g/
 │   │   ├── bash.ts               超时 + 输出截断（默认 120s/100K 字符）
 │   │   ├── glob.ts               走 fs-utils 的 walk
 │   │   ├── grep.ts               ripgrep 后端
-│   │   └── index.ts              TOOL_REGISTRY + ToolName 派生源
-│   └── ui/                     终端交互
-│       ├── input.ts              InputController（readline + ctrl-c）
-│       ├── renderer.ts           AgentEvent → 终端着色
-│       ├── markdown.ts           Markdown → ANSI（流式按行攒 + 一次性渲染）
-│       └── print.ts              -p / 管道 / 缺 TTY 走这条
+│   │   ├── index.ts              TOOL_REGISTRY + ToolName 派生源
+│   │   └── doc/                  子模块文档（README.md）
+│   ├── ui/                     终端交互
+│   │   ├── input.ts              InputController（readline + ctrl-c）
+│   │   ├── renderer.ts           AgentEvent → 终端着色
+│   │   ├── markdown.ts           Markdown → ANSI（流式按行攒 + 一次性渲染）
+│   │   ├── print.ts              -p / 管道 / 缺 TTY 走这条
+│   │   └── doc/                  子模块文档（README.md）
+│   └── doc/                    src/ 全局文档（README.md：数据流图 + 约定）
 └── tests/
     └── run.ts                零依赖运行器，当前 46 个用例
 ```
@@ -317,6 +323,7 @@ User #1 → Assistant #1 → User #3 → Assistant #3
 - **用命名导出**，不用 default。需要 barrel 的目录（`tools/`、`providers/`）放 `index.ts`。
 - **文件头写一段中文 JSDoc**，说明这个文件在流程图里负责哪一块。
 - **面向用户的文案用简体中文**（UI 输出、错误提示、README、本文件）。
+- **每个 `src/**` 子目录自带一份 `doc/README.md`**——把目录的职责、关键 API、协作边界、扩展指引、已知坑写进去。归档结构见上一节「文件树」，`src/doc/README.md` 是入口总览。改动目录职责、新增文件、删文件、改外部协作边界时**必须同步更新**对应 `doc/README.md`；结构无实质变化（改名/参数微调）可以只改文件树注释行。
 
 ## 加一个工具
 
@@ -459,3 +466,4 @@ test("用一句话说明验证什么", async () => {
   清理孤儿工具结果、按整轮丢弃上下文，都依赖这个结构。改 `agent.ts` 写回消息的部分要特别小心。
 - **不要提交** `.env`、`node_modules/`、`dist/`、`*.log`、`.DS_Store`（已在 `.gitignore`）。
   配置样例放 `.env.example`。
+- **改了 `src/**` 的目录职责、协作边界、外部 API 时同步 `doc/README.md`**。`src/agent/` 加新事件 → `src/agent/doc/README.md` 的「事件清单」要补；`src/context/` 改 `transformContext` → `src/context/doc/README.md` 的三步图要重画；`src/providers/` 加供应商 → `src/providers/doc/README.md` 的差异表要补。约定见上「代码约定」一节。
