@@ -6,7 +6,7 @@
 import type { Tool } from "../tools/types.js";
 import { truncateText } from "../tools/fs-utils.js";
 import type { AgentMessage, ToolResultMessage } from "../types.js";
-import { estimateTokens } from "./state.js";
+import { estimateTokens, activeBranch } from "./state.js";
 import type { AgentState } from "./state.js";
 
 export interface TransformOptions {
@@ -146,7 +146,11 @@ export function transformContext(
 ): TransformedContext {
   const options = { ...defaultTransformOptions, ...overrides };
 
-  const cleaned = dropOrphanToolResults(state.messages);
+  // 输入不再是扁平数组，而是 ★ Current Node 反向遍历得到的线性序列
+  // ——这正是 AGENTS.md「概念视图：会话是一棵树」一节描述的 LLM 上下文边界
+  // ★ 缺失时（老测试直接给 messages 赋值的兼容路径）fallback 到 messages
+  const linear = activeBranch(state);
+  const cleaned = dropOrphanToolResults(linear);
   const pruned = pruneOldTurns(cleaned.messages, options);
   const trimmed = trimToBudget(pruned.messages, state.systemPrompt, options);
 

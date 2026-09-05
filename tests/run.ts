@@ -12,6 +12,7 @@ import { Agent, type AgentEvent } from "../src/agent/agent.js";
 import { transformContext } from "../src/agent/context.js";
 import { convertToLlm } from "../src/agent/convert.js";
 import { createInitialState } from "../src/agent/state.js";
+import { activeBranch, addNodeAt, appendNode, pathToRoot, switchTo } from "../src/agent/state.js";
 import { createMockStream } from "../src/providers/mock.js";
 import type { StreamFn, StreamOptions } from "../src/providers/types.js";
 import { allTools, bashTool, editTool, globTool, grepTool, readTool, writeTool, type ToolName } from "../src/tools/index.js";
@@ -26,6 +27,7 @@ import type {
   ModelRef,
   ToolCallContent,
 } from "../src/types.js";
+import { emptyUsage } from "../src/types.js";
 
 interface Case {
   name: string;
@@ -310,6 +312,112 @@ test("transformContext: 清理孤儿工具结果并按预算裁剪", () => {
   const last = ctx.messages[ctx.messages.length - 1];
   assert.equal(last?.role, "assistant", "最后一轮必须保住");
   assert.ok(ctx.messages.length < messages.length);
+});
+
+// ----------------------------------------------------------------- 树状
+
+test("tree: appendNode 推进 ★ Current Node 且 messages 同步", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  const u = appendNode(state, { role: "user", content: "hi", timestamp: 0 });
+  assert.equal(state.currentNodeId, u.id);
+  assert.equal(state.rootId, u.id);
+  assert.equal(state.nodes.size, 1);
+  assert.deepEqual(state.messages.map((m) => m.content), ["hi"]);
+
+  const a = appendNode(state, { role: "assistant", content: [{ type: "text", text: "yo" }], model: "mock", stopReason: "stop", usage: emptyUsage(), timestamp: 1 });
+  assert.equal(state.currentNodeId, a.id);
+  assert.equal(a.parent, u.id);
+  assert.equal(u.children.length, 1);
+  assert.equal(u.children[0], a.id);
+  assert.deepEqual(
+    state.messages.map((m) => m.role),
+    ["user", "assistant"],
+  );
+  assert.equal(state.nodes.size, 2);
+});
+
+test("tree: addNodeAt 可创建分支，且 ★ 切换会同步 messages", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+
+  const u1 = appendNode(state, { role: "user", content: "u1", timestamp: 1 });
+  const a1 = appendNode(state, {
+    role: "assistant",
+    content: [{ type: "text", text: "a1" }],
+    model: "m",
+    stopReason: "stop",
+    usage: emptyUsage(),
+    timestamp: 2,
+  });
+
+  // 在 a1 下开一个新的 user 节点（不和 a1 默认的「下一条线性」冲突）
+  const u_branch = addNodeAt(state, a1.id, { role: "user", content: "u-branch", timestamp: 3 });
+  assert.equal(u_branch.parent, a1.id);
+  assert.equal(state.currentNodeId, u_branch.id);
+  assert.equal(state.messages.length, 3);
+
+  // 切回 a1：messages 应同步成 [u1, a1]
+  switchTo(state, a1.id);
+  assert.equal(state.currentNodeId, a1.id);
+  assert.deepEqual(
+    state.messages.map((m) => m.role),
+    ["user", "assistant"],
+  );
+
+  // 在 a1 下追加新的 user 节点——和 u_branch 平起平坐
+  const u_main = appendNode(state, { role: "user", content: "u-main", timestamp: 4 });
+  assert.equal(u_main.parent, a1.id);
+  assert.equal(a1.children.length, 2);
+
+  // 再切回 u_branch：messages 应同步成 [u1, a1, u_branch]
+  switchTo(state, u_branch.id);
+  assert.equal(state.messages.length, 3);
+  assert.equal(state.messages[2]?.role, "user");
+  assert.equal(
+    (state.messages[2] as { content: string }).content,
+    "u-branch",
+  );
+
+  // u1 永远只有一个 a1 子节点
+  assert.equal(u1.children.length, 1);
+  assert.equal(u1.children[0], a1.id);
+});
+
+test("tree: 兼容路径——直接赋值 messages 时 activeBranch fallback", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  // 没有走 appendNode，直接 push messages（模拟老写法 / 把兼容路径用起来）
+  state.messages.push({ role: "user", content: "u", timestamp: 0 });
+  state.messages.push({ role: "assistant", content: [{ type: "text", text: "a" }], model: "mock", stopReason: "stop", usage: emptyUsage(), timestamp: 1 });
+  // currentNodeId 仍是 null，activeBranch 应回退到 messages 数组
+  assert.equal(state.currentNodeId, null);
+  assert.equal(state.nodes.size, 0);
+  assert.deepEqual(
+    activeBranch(state).map((m) => m.role),
+    ["user", "assistant"],
+  );
+});
+
+test("tree: pathToRoot 安全处理坏 id", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  appendNode(state, { role: "user", content: "u", timestamp: 0 });
+  // 不存在的 id：应当返回 [] 而不抛错
+  assert.deepEqual(pathToRoot(state, "non-existent"), []);
+  assert.deepEqual(pathToRoot(state, null), []);
 });
 
 // ------------------------------------------------------------- 端到端

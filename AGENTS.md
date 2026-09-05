@@ -272,11 +272,11 @@ User #1 → Assistant #1 → User #3 → Assistant #3
 
 | 设计语义 | c-agent 当前实现 |
 | --- | --- |
-| 每条消息带 `parent` 指针 | 扁平 `messages[]`，无 `parent` |
-| `★ Current Node` 概念 | 不存在；所有消息默认全部进上下文 |
-| 分支（Branch A / B）并存 | steering 仅合并成新的 `user` 消息，不创建分支 |
-| LLM 看到的 = `★ → Root` 线性序列 | 直接按数组顺序拼 |
-| 反向遍历 | 不存在，按数组遍历 |
+| 每条消息带 `parent` 指针 | ✅ `MessageNode { id, parent, children, message }` 存于 `state.nodes` |
+| `★ Current Node` 概念 | ✅ `state.currentNodeId`；所有写入（user / assistant / toolResult）都推进到新节点 |
+| 分支（Branch A / B）并存 | ⚠️ 数据层 OK（`addNodeAt` + `switchTo`），但 UI 未暴露——steering 仍合并成 user 消息 |
+| LLM 看到的 = `★ → Root` 线性序列 | ✅ `transformContext` 用 `activeBranch(state)` 而不是 `state.messages` |
+| 反向遍历 | ✅ `pathToRoot(state, id)` 带环检测，坏 id 返回 `[]` |
 
 **诚实结论**：当前 c-agent 用 `messages[]` 数组**近似**这个树，能跑通所有内置功能，
 但**不支持**树状语义才有的能力——分支探索、回退重放、上下文切片、跨分支对比。

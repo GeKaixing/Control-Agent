@@ -19,6 +19,7 @@ import { assistantToolCalls, emptyUsage } from "../types.js";
 import { transformContext, type TransformOptions } from "./context.js";
 import { convertToLlm } from "./convert.js";
 import { MessageQueue } from "./queue.js";
+import { appendNode, currentNode } from "./state.js";
 import type { AgentState } from "./state.js";
 
 export type AgentEvent =
@@ -175,7 +176,7 @@ export class Agent {
 
       const llmMessages = convertToLlm(ctx.messages);
       const assistant = await this.callModel(ctx.tools, llmMessages);
-      this.state.messages.push(assistant);
+      appendNode(this.state, assistant);
       this.emit({ type: "turn_end", message: assistant });
 
       if (assistant.stopReason === "error" || assistant.stopReason === "aborted") {
@@ -331,7 +332,7 @@ export class Agent {
         isError: result.isError,
         timestamp: Date.now(),
       };
-      this.state.messages.push(message);
+      appendNode(this.state, message);
     }
 
     return outcomes;
@@ -377,12 +378,18 @@ export class Agent {
       content,
       timestamp: Date.now(),
     };
-    this.state.messages.push(message);
+    appendNode(this.state, message);
   }
 
-  /** 最后一条消息是 user 或 toolResult，说明还有活没干完 */
+  /**
+   * 最后一条消息是 user 或 toolResult，说明还有活没干完。
+   * 优先读 ★ Current Node 上的消息；★ 缺失时取 messages 数组末位
+   * （老 fallback 路径 / 没塞进过节点的纯 messages 数组状态）。
+   */
   private hasPendingWork(): boolean {
-    const last = this.state.messages[this.state.messages.length - 1];
+    const current = currentNode(this.state);
+    const last =
+      current?.message ?? this.state.messages[this.state.messages.length - 1];
     return last !== undefined && (last.role === "user" || last.role === "toolResult");
   }
 
