@@ -22,12 +22,12 @@ import {
 import { convertToLlm } from "../src/agent/convert.js";
 import { createMockStream } from "../src/providers/mock.js";
 import type { StreamFn, StreamOptions } from "../src/providers/types.js";
-import { allTools, bashTool, editTool, globTool, grepTool, readTool, writeTool, type ToolName } from "../src/tools/index.js";
+import { allTools, bashTool, editTool, globTool, grepTool, readTool, resolveShell, writeTool, type ToolName } from "../src/tools/index.js";
 import type { Tool } from "../src/tools/types.js";
 import { ok } from "../src/tools/types.js";
 import { globToRegExp, matchesGlob } from "../src/tools/glob-matcher.js";
 import { validateParams } from "../src/tools/validate.js";
-import { buildSeedMessages, DEFAULT_PREFILL_COMMIT } from "../src/index.js";
+import { buildSeedMessages, DEFAULT_PREFILL_COMMIT } from "../src/session.js";
 import { createPrintOutput } from "../src/ui/print.js";
 import { createMarkdownStream, renderMarkdown } from "../src/ui/markdown.js";
 import type {
@@ -1089,6 +1089,43 @@ test("print 模式：notice 与上下文裁剪只是警告，不影响退出码"
   ]);
   assert.deepEqual(out.errors, []);
   assert.equal(out.exitCode, 0);
+});
+
+// ----------------------------------------------------- bash 跨平台 shell
+
+test("resolveShell: 非 win32 恒返回 bash -lc，与原行为字节级一致", () => {
+  const spec = resolveShell();
+  if (process.platform !== "win32") {
+    assert.equal(spec.file, "bash");
+    assert.deepEqual(spec.args("echo hi"), ["-lc", "echo hi"]);
+  } else {
+    // win32 下要么是某个真实存在的 bash.exe，要么是 powershell.exe
+    if (spec.file !== "powershell.exe") {
+      assert.ok(
+        spec.file.toLowerCase().endsWith("bash.exe"),
+        `win32 下非 PowerShell 时应该指向 bash.exe，得到 ${spec.file}`,
+      );
+    }
+    assert.ok(typeof spec.args("echo hi")[0] === "string");
+  }
+});
+
+test("bash 工具：非 win32 上能跑 echo bash-ok", async () => {
+  if (process.platform === "win32") return; // 条件用例，win32 上的 PowerShell 用例暂未覆盖
+  const tmp = await tempDir();
+  try {
+    const result = await bashTool.execute(
+      { command: "echo bash-ok" },
+      { cwd: tmp, signal: new AbortController().signal },
+    );
+    assert.equal(result.isError, false);
+    assert.ok(
+      result.content.some((c) => c.text.includes("bash-ok")),
+      `应该返回包含 bash-ok 的输出，得到 ${JSON.stringify(result.content)}`,
+    );
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------- runner

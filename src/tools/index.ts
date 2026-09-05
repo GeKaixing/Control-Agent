@@ -1,7 +1,7 @@
 /** 工具注册表 */
 
 import type { LlmTool } from "../providers/types.js";
-import { bashTool } from "./bash.js";
+import { bashTool, resolveShell, type ShellSpec } from "./bash.js";
 import { editTool } from "./edit.js";
 import { globTool } from "./glob.js";
 import { grepTool } from "./grep.js";
@@ -57,4 +57,5 @@ export function describeToolsForModel(tools: Tool[] = allTools): LlmTool[] {
 }
 
 export type { Tool, ToolContext, ToolResult } from "./types.js";
-export { bashTool, editTool, globTool, grepTool, readTool, writeTool };
+export { bashTool, editTool, globTool, grepTool, readTool, writeTool, resolveShell };
+export type { ShellSpec };

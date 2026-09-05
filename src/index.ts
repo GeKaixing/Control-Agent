@@ -3,22 +3,16 @@
  * CLI 入口：组装代理状态、工具、队列与终端 UI，然后进入 REPL。
  */
 
-import { promises as fs } from "node:fs";
 import path from "node:path";
 import { Agent, type AgentEvent } from "./agent/agent.js";
-import { MessageQueue, createInitialState, totalUsage } from "./context/index.js";
-import {
-  defaultModel,
-  parseModelSpec,
-  resolveModel,
-} from "./providers/index.js";
+import { totalUsage } from "./context/index.js";
 import type { StreamFn } from "./providers/types.js";
+import { assembleSession, buildSeedMessages, resolveModelSpec } from "./session.js";
 import { allTools } from "./tools/index.js";
 import { InputController } from "./ui/input.js";
 import { createPrintOutput, readStdin } from "./ui/print.js";
 import { renderMarkdown } from "./ui/markdown.js";
 import { TerminalRenderer } from "./ui/renderer.js";
-import type { ModelRef } from "./types.js";
 
 const HELP = [
   "命令：",
@@ -117,68 +111,7 @@ function parseArgs(argv: string[]): CliArgs {
   return args;
 }
 
-/**
- * `--assistant-prompt` 注入 prefill 后默认追加的那条「接续触发」用户消息。
- * prefill 模型只看到一段没有「上一轮对话」的助手输出，对话框其实还停在
- * prefill 自身——为了让 LLM 真正开始接续，我们需要一条用户消息把它推下去。
- * 这个文本对用户可见，可通过 `--prefill-commit` 自定义或传 `""` 跳过。
- */
-export const DEFAULT_PREFILL_COMMIT = "[c-agent prefill] 请基于上一条助手消息继续。";
-
-/**
- * 把 CLI 参数翻译成 `createInitialState` 的 `seedMessages`。
- * 拆成纯函数以便单测；不再直接拿整个 `CliArgs`，只关心这四个字段。
- *
- * 规则：
- * - `userPrompt` 与 `positional` 互斥，二选一；同时给出返回 `error`
- * - `assistantPrompt` 必须与 `userPrompt` 同用；后面会追加一条
- *   「请基于上一条助手消息继续」类的用户消息触发接续轮次
- *
- * `prefillCommit` 决定那条接续消息怎么写：
- * - `null`：用 `DEFAULT_PREFILL_COMMIT`
- * - `""`  显式空串：跳过，模型从 prefill 静默接续
- * - 其他：完整替换默认文本
- */
-export function buildSeedMessages(args: {
-  userPrompt: string | null;
-  assistantPrompt: string | null;
-  positional: string;
-  prefillCommit: string | null;
-}): { seeds: { role: "user" | "assistant"; content: string }[]; error?: string } {
-  const seeds: { role: "user" | "assistant"; content: string }[] = [];
-  const hasUserPrompt = args.userPrompt !== null && args.userPrompt.length > 0;
-  const hasPositional = args.positional.length > 0;
-  const hasAssistantPrompt = args.assistantPrompt !== null && args.assistantPrompt.length > 0;
-
-  if (hasUserPrompt && hasPositional) {
-    return {
-      seeds: [],
-      error: "--user-prompt 与位置参数互斥，请二选一。",
-    };
-  }
-  if (hasAssistantPrompt && !hasUserPrompt) {
-    return {
-      seeds: [],
-      error: "--assistant-prompt 必须与 --user-prompt 同用：prefill 需要跟在 user 消息之后。",
-    };
-  }
-
-  if (hasUserPrompt) {
-    seeds.push({ role: "user", content: args.userPrompt ?? "" });
-  }
-  if (hasAssistantPrompt) {
-    seeds.push({ role: "assistant", content: args.assistantPrompt ?? "" });
-    // prefillCommit：null → 默认；"" → 跳过；其他 → 完整替换
-    if (args.prefillCommit !== null && args.prefillCommit.length === 0) {
-      // 跳过：模型会直接从 prefill 接续而不被「触发」
-    } else {
-      const commitText = args.prefillCommit ?? DEFAULT_PREFILL_COMMIT;
-      seeds.push({ role: "user", content: commitText });
-    }
-  }
-
-  return { seeds };
-}
+export { buildSeedMessages, DEFAULT_PREFILL_COMMIT, assembleSession } from "./session.js";
 
 /**
  * print 模式的提示词来源：位置参数优先，其次 stdin。
@@ -192,23 +125,6 @@ async function resolvePrompt(fromArgs: string, stdinIsTty: boolean): Promise<str
 }
 
 /** 极简 .env 加载：不覆盖已存在的环境变量 */
-async function loadDotEnv(cwd: string): Promise<void> {
-  try {
-    const raw = await fs.readFile(path.join(cwd, ".env"), "utf8");
-    for (const line of raw.split("\n")) {
-      const trimmed = line.trim();
-      if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
-      const eq = trimmed.indexOf("=");
-      if (eq === -1) continue;
-      const key = trimmed.slice(0, eq).trim();
-      if (process.env[key] !== undefined) continue;
-      process.env[key] = trimmed.slice(eq + 1).trim();
-    }
-  } catch {
-    // .env 不存在是正常情况
-  }
-}
-
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
 
@@ -218,7 +134,6 @@ async function main(): Promise<number> {
   }
 
   const cwd = path.resolve(args.cwd ?? process.cwd());
-  await loadDotEnv(cwd);
 
   // 没有终端就没有交互可言：提示词读不进来、进度也画不出来，直接走 print 模式
   const stdinIsTty = process.stdin.isTTY === true;
@@ -226,9 +141,6 @@ async function main(): Promise<number> {
 
   // 管道 / 重定向时不能打转义序列，否则下游拿到的是一串 \x1b[1m 之类的噪声
   const markdown = args.markdown && process.stdout.isTTY === true;
-
-  const model: ModelRef = args.model !== undefined ? parseModelSpec(args.model) : defaultModel();
-  let resolved = resolveModel(model);
 
   const seedResult = buildSeedMessages({
     userPrompt: args.userPrompt,
@@ -241,15 +153,16 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const state = createInitialState({
+  const assembled = await assembleSession({
     cwd,
-    model: resolved.model,
-    tools: allTools,
+    modelSpec: args.model,
     ...(args.systemPrompt !== null ? { systemPrompt: args.systemPrompt } : {}),
     ...(args.appendSystemPrompt !== null ? { appendSystemPrompt: args.appendSystemPrompt } : {}),
     ...(seedResult.seeds.length > 0 ? { seedMessages: seedResult.seeds } : {}),
   });
-  const queue = new MessageQueue();
+  const { state, queue } = assembled;
+  // resolved 后续 /model 命令会改，所以单独拎出来
+  let resolved = assembled.resolved;
   let verbose = args.verbose;
 
   let renderer: TerminalRenderer | undefined;
@@ -371,7 +284,7 @@ async function main(): Promise<number> {
               console.log(`  当前模型：${state.model.provider}:${state.model.id}`);
               break;
             }
-            resolved = resolveModel(parseModelSpec(argument));
+            resolved = resolveModelSpec(argument).resolved;
             stream = resolved.stream;
             agent.setModel(resolved.model, stream);
             console.log(`  已切换到 ${resolved.model.provider}:${resolved.model.id}`);
