@@ -20,6 +20,7 @@ import type { Tool } from "../src/tools/types.js";
 import { ok } from "../src/tools/types.js";
 import { globToRegExp, matchesGlob } from "../src/tools/glob-matcher.js";
 import { validateParams } from "../src/tools/validate.js";
+import { buildSeedMessages, DEFAULT_PREFILL_COMMIT } from "../src/index.js";
 import { createPrintOutput } from "../src/ui/print.js";
 import type {
   AgentMessage,
@@ -517,6 +518,120 @@ test("prompts: appendSystemPrompt 与 seedMessages 同时使用，互不冲突",
   assert.ok(state.systemPrompt.endsWith("末尾规则。"));
   assert.equal(state.messages.length, 1);
   assert.equal(state.messages[0]?.role === "user" ? state.messages[0].content : "", "你好");
+});
+
+// -------------------- CLI: --prefill-commit 配置 --------------------
+
+test("cli: buildSeedMessages --assistant-prompt 不传 prefillCommit 时用默认接续消息", () => {
+  const { seeds, error } = buildSeedMessages({
+    userPrompt: "用一句话回答",
+    assistantPrompt: "好的，",
+    positional: "",
+    prefillCommit: null,
+  });
+  assert.equal(error, undefined);
+  assert.equal(seeds.length, 3);
+  assert.equal(seeds[0]?.content, "用一句话回答");
+  assert.equal(seeds[1]?.content, "好的，");
+  assert.equal(seeds[2]?.content, DEFAULT_PREFILL_COMMIT);
+  assert.equal(seeds[2]?.content, "[c-agent prefill] 请基于上一条助手消息继续。");
+});
+
+test("cli: buildSeedMessages 自定义 prefillCommit 完整替换默认接续消息", () => {
+  const { seeds, error } = buildSeedMessages({
+    userPrompt: "u",
+    assistantPrompt: "好的，",
+    positional: "",
+    prefillCommit: "--- PLEASE CONTINUE FROM HERE ---",
+  });
+  assert.equal(error, undefined);
+  assert.equal(seeds.length, 3);
+  assert.equal(seeds[2]?.role, "user");
+  if (seeds[2]?.role === "user") assert.equal(seeds[2].content, "--- PLEASE CONTINUE FROM HERE ---");
+  // 不应再包含默认的那条中文消息
+  assert.ok(!seeds.some((s) => s.content === DEFAULT_PREFILL_COMMIT));
+});
+
+test("cli: buildSeedMessages 传空串 prefillCommit 表示「跳过接续消息」", () => {
+  const { seeds, error } = buildSeedMessages({
+    userPrompt: "u",
+    assistantPrompt: "好的，",
+    positional: "",
+    prefillCommit: "",
+  });
+  assert.equal(error, undefined);
+  // 只有 user + assistant 两条，prefill 后不追加任何东西
+  assert.equal(seeds.length, 2);
+  assert.equal(seeds[0]?.role, "user");
+  assert.equal(seeds[1]?.role, "assistant");
+});
+
+test("cli: buildSeedMessages 不传 assistantPrompt 时 prefillCommit 没有意义也不生效", () => {
+  // 只有 user 提示词；不应该被强行追加 prefillCommit
+  const { seeds, error } = buildSeedMessages({
+    userPrompt: "u",
+    assistantPrompt: null,
+    positional: "",
+    prefillCommit: "这条不该出现",
+  });
+  assert.equal(error, undefined);
+  assert.equal(seeds.length, 1);
+  assert.equal(seeds[0]?.role, "user");
+  if (seeds[0]?.role === "user") assert.equal(seeds[0].content, "u");
+});
+
+test("cli: buildSeedMessages 仍拒绝 --user-prompt 与位置参数同时给出", () => {
+  const { seeds, error } = buildSeedMessages({
+    userPrompt: "u",
+    assistantPrompt: null,
+    positional: "from positional",
+    prefillCommit: null,
+  });
+  assert.ok(error !== undefined);
+  assert.equal(seeds.length, 0);
+});
+
+test("cli: buildSeedMessages 仍要求 --assistant-prompt 与 --user-prompt 同用", () => {
+  const { error } = buildSeedMessages({
+    userPrompt: null,
+    assistantPrompt: "孤零零的 prefill",
+    positional: "fallback positional",
+    prefillCommit: "x",
+  });
+  assert.ok(error !== undefined);
+  assert.match(error ?? /.*/, /--assistant-prompt/);
+});
+
+test("cli: 自定义 prefillCommit 真的进了 transformContext 路径", () => {
+  // 端到端一次：用 createInitialState 的 seedMessages 拼接，证明消息能传到 LLM 看到的地方
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+    seedMessages: [
+      { role: "user", content: "u" },
+      { role: "assistant", content: "好的，" },
+      { role: "user", content: ">>> CONTINUE PROMPT <<<" }, // 用户自定义的 commit
+    ],
+  });
+  const out = transformContext(state);
+  // 最后一条 user 应该就是 commit 自定义内容
+  const last = out.messages[out.messages.length - 1];
+  assert.ok(last !== undefined);
+  if (last !== undefined && last.role === "user") {
+    assert.equal(last.content, ">>> CONTINUE PROMPT <<<");
+  } else {
+    assert.fail("expected last message to be user");
+  }
+  // assistant 消息的 content 是 AssistantContent[]，需要从 text 块里取
+  function assistantText(m: (typeof out.messages)[number]): string {
+    if (m.role !== "assistant") return "";
+    return m.content
+      .filter((c): c is { type: "text"; text: string } => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+  }
+  assert.ok(out.messages.some((m) => assistantText(m) === "好的，"));
 });
 
 // ------------------------------------------------------------- 端到端

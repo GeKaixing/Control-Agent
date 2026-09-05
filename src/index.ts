@@ -47,6 +47,8 @@ const HELP = [
   "  --user-prompt,          -up   显式传入用户提示词（与位置参数互斥，二选一）",
   "  --assistant-prompt,     -ap   注入一段助手 prefill，必须与 --user-prompt 同用",
   "                            注入后会追加一条用户消息触发「接续」轮次。",
+  "  --prefill-commit,       -pc   自定义上面那条「接续」消息的内容；",
+  "                            传空串 \"\" 则完全跳过，不追加任何默认消息。",
 ].join("\n");
 
 interface CliArgs {
@@ -65,6 +67,13 @@ interface CliArgs {
   userPrompt: string | null;
   /** 助手 prefill（必须与 userPrompt 同用） */
   assistantPrompt: string | null;
+  /**
+   * 助手 prefill 后追加的「接续」消息内容。
+   * - `null`：未传入；调用 buildSeedMessages 时回退到 `DEFAULT_PREFILL_COMMIT`
+   * - `""`：显式空串；跳过追加，模型会直接从 prefill 接续而不被「触发」
+   * - 其他：完整替换默认消息
+   */
+  prefillCommit: string | null;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -79,6 +88,7 @@ function parseArgs(argv: string[]): CliArgs {
     appendSystemPrompt: null,
     userPrompt: null,
     assistantPrompt: null,
+    prefillCommit: null,
   };
   const positional: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -92,6 +102,7 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === "--append-system-prompt" || a === "-asp") args.appendSystemPrompt = argv[++i] ?? "";
     else if (a === "--user-prompt" || a === "-up") args.userPrompt = argv[++i] ?? "";
     else if (a === "--assistant-prompt" || a === "-ap") args.assistantPrompt = argv[++i] ?? "";
+    else if (a === "--prefill-commit" || a === "-pc") args.prefillCommit = argv[++i] ?? "";
     else if (a !== undefined) positional.push(a);
   }
   args.prompt = positional.join(" ").trim();
@@ -99,19 +110,36 @@ function parseArgs(argv: string[]): CliArgs {
 }
 
 /**
- * 把 CLI 参数翻译成 `createInitialState` 的 `seedMessages`。
- * 规则：
- * - `--user-prompt` 与位置参数互斥，二选一；同时给出会报错并打印帮助
- * - `--assistant-prompt` 必须与 `--user-prompt` 同用；后面会追加一条
- *   「请基于上一条助手消息继续」的用户消息触发接续轮次
+ * `--assistant-prompt` 注入 prefill 后默认追加的那条「接续触发」用户消息。
+ * prefill 模型只看到一段没有「上一轮对话」的助手输出，对话框其实还停在
+ * prefill 自身——为了让 LLM 真正开始接续，我们需要一条用户消息把它推下去。
+ * 这个文本对用户可见，可通过 `--prefill-commit` 自定义或传 `""` 跳过。
  */
-function buildSeedMessages(
-  args: CliArgs,
-  promptSource: { prompt: string },
-): { seeds: { role: "user" | "assistant"; content: string }[]; error?: string } {
+export const DEFAULT_PREFILL_COMMIT = "[c-agent prefill] 请基于上一条助手消息继续。";
+
+/**
+ * 把 CLI 参数翻译成 `createInitialState` 的 `seedMessages`。
+ * 拆成纯函数以便单测；不再直接拿整个 `CliArgs`，只关心这四个字段。
+ *
+ * 规则：
+ * - `userPrompt` 与 `positional` 互斥，二选一；同时给出返回 `error`
+ * - `assistantPrompt` 必须与 `userPrompt` 同用；后面会追加一条
+ *   「请基于上一条助手消息继续」类的用户消息触发接续轮次
+ *
+ * `prefillCommit` 决定那条接续消息怎么写：
+ * - `null`：用 `DEFAULT_PREFILL_COMMIT`
+ * - `""`  显式空串：跳过，模型从 prefill 静默接续
+ * - 其他：完整替换默认文本
+ */
+export function buildSeedMessages(args: {
+  userPrompt: string | null;
+  assistantPrompt: string | null;
+  positional: string;
+  prefillCommit: string | null;
+}): { seeds: { role: "user" | "assistant"; content: string }[]; error?: string } {
   const seeds: { role: "user" | "assistant"; content: string }[] = [];
   const hasUserPrompt = args.userPrompt !== null && args.userPrompt.length > 0;
-  const hasPositional = promptSource.prompt.length > 0;
+  const hasPositional = args.positional.length > 0;
   const hasAssistantPrompt = args.assistantPrompt !== null && args.assistantPrompt.length > 0;
 
   if (hasUserPrompt && hasPositional) {
@@ -132,7 +160,13 @@ function buildSeedMessages(
   }
   if (hasAssistantPrompt) {
     seeds.push({ role: "assistant", content: args.assistantPrompt ?? "" });
-    seeds.push({ role: "user", content: "[c-agent prefill] 请基于上一条助手消息继续。" });
+    // prefillCommit：null → 默认；"" → 跳过；其他 → 完整替换
+    if (args.prefillCommit !== null && args.prefillCommit.length === 0) {
+      // 跳过：模型会直接从 prefill 接续而不被「触发」
+    } else {
+      const commitText = args.prefillCommit ?? DEFAULT_PREFILL_COMMIT;
+      seeds.push({ role: "user", content: commitText });
+    }
   }
 
   return { seeds };
@@ -185,7 +219,12 @@ async function main(): Promise<number> {
   const model: ModelRef = args.model !== undefined ? parseModelSpec(args.model) : defaultModel();
   let resolved = resolveModel(model);
 
-  const seedResult = buildSeedMessages(args, { prompt: args.prompt });
+  const seedResult = buildSeedMessages({
+    userPrompt: args.userPrompt,
+    assistantPrompt: args.assistantPrompt,
+    positional: args.prompt,
+    prefillCommit: args.prefillCommit,
+  });
   if (seedResult.error !== undefined) {
     console.error(`错误：${seedResult.error}`);
     return 2;

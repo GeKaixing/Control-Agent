@@ -69,7 +69,7 @@ g/
 │       ├── renderer.ts           AgentEvent → 终端着色
 │       └── print.ts              -p / 管道 / 缺 TTY 走这条
 └── tests/
-    └── run.ts                零依赖运行器，当前 31 个用例
+    └── run.ts                零依赖运行器，当前 38 个用例
 ```
 
 ### 各目录一行职责
@@ -397,7 +397,12 @@ test("用一句话说明验证什么", async () => {
 
 `state.systemPrompt: string` 始终是「最终拼好的串」——base + 可选 append 段。`appendNode` 在 init 时跑完 `seedMessages` 里的每条，所以后续 `agent.run()` 看到的就是含种子的树。
 
-`--assistant-prompt`（prefill）的语义：跟在 user 消息之后注入，模型会从这里接续。CLI 在 prefill 之后会自动追加一条用户消息 `[c-agent prefill] 请基于上一条助手消息继续。` 触发接续轮次；所以 `--assistant-prompt` 不允许单独使用——必须配合 `--user-prompt`。
+`--assistant-prompt`（prefill）的语义：跟在 user 消息之后注入，模型会从这里接续。CLI 在 prefill 之后会自动追加一条用户消息，默认内容 `[c-agent prefill] 请基于上一条助手消息继续。`——这是为了让对话「突破 prefill 的死端」真正往前走。这条默认消息可通过 `--prefill-commit` / `-pc` 自定义：
+
+- 传任意非空文本：完整替换默认接续消息
+- 传 `""`：**完全跳过**追加，模型会从 prefill 静默接续（适用场景：prefill 自身已经在引导对话）
+
+`--assistant-prompt` 不允许单独使用——必须配合 `--user-prompt`，因为 prefill 必须跟在 user 之后。`DEFAULT_PREFILL_COMMIT` 常量在 `src/index.ts` 里导出，单测可直接断言。
 
 ## 注意事项 / 已知的坑
 

@@ -47,7 +47,8 @@ npm start -- --model anthropic:claude-3-7-sonnet-latest
 | `--system-prompt, -sp <text>`     | 完全替换默认系统提示词                       |
 | `--append-system-prompt, -asp <text>` | 在默认系统提示词末尾追加一段指令               |
 | `--user-prompt, -up <text>`       | 显式传入用户提示词（与位置参数互斥）               |
-| `--assistant-prompt, -ap <text>`  | 注入一段助手 prefill；必须与 `--user-prompt` 同用 |
+| `--assistant-prompt, -ap <text>`     | 注入一段助手 prefill；必须与 `--user-prompt` 同用 |
+| `--prefill-commit, -pc <text>`      | 自定义 prefill 后追加的那条接续消息；传 `""` 表示跳过 |
 
 交互模式下的斜杠命令：`/help` `/model <spec>` `/tools` `/usage` `/clear` `/verbose` `/exit`。  
 运行中按 Ctrl-C 中断当前任务，Ctrl-D 退出。
@@ -90,9 +91,15 @@ npm start -- --model mock --user-prompt "用一句话回答"
 
 # 注入助手 prefill：模型会从「好的，」接续
 npm start -- --model mock --user-prompt "用一句话回答" --assistant-prompt "好的，"
+
+# 自定义 prefill 后的接续消息
+npm start -- --model mock --user-prompt "u" --assistant-prompt "好的，" --prefill-commit ">>> CONTINUE <<<"
+
+# 传空串：跳过接续消息，模型从 prefill 静默接续
+npm start -- --model mock --user-prompt "u" --assistant-prompt "好的，" --prefill-commit ""
 ```
 
-`-ap` 注入 prefill 后会自动追加一条用户消息（`[c-agent prefill] 请基于上一条助手消息继续。`），触发接续轮次。prefill 必须跟在 user 之后，所以 `--assistant-prompt` 不允许单独使用。
+`-ap` 注入 prefill 后会自动追加一条用户消息触发接续轮次。文本默认是 `[c-agent prefill] 请基于上一条助手消息继续。`，可用 `--prefill-commit` 自定义；传空串 `""` 表示**完全跳过追加**，模型会从 prefill 静默接续。prefill 必须跟在 user 之后，所以 `--assistant-prompt` 不允许单独使用。
 
 ## 架构
 
@@ -161,7 +168,7 @@ tests/run.ts         零依赖测试运行器
 ## 测试
 
 ```bash
-npm test           # 31 个用例
+npm test           # 38 个用例
 npm run typecheck  # tsc --noEmit
 ```
 
