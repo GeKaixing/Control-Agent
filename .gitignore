@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+*.log
+.DS_Store
+
+# 代理工作记忆（.workbuddy/memory/），属于本地笔记，不进版本库
+.workbuddy/
