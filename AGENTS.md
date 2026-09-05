@@ -399,6 +399,7 @@ test("用一句话说明验证什么", async () => {
 
 `--assistant-prompt`（prefill）的语义：跟在 user 消息之后注入，模型会从这里接续。CLI 在 prefill 之后会自动追加一条用户消息，默认内容 `[c-agent prefill] 请基于上一条助手消息继续。`——这是为了让对话「突破 prefill 的死端」真正往前走。这条默认消息可通过 `--prefill-commit` / `-pc` 自定义：
 
+- 不传：用 `DEFAULT_PREFILL_COMMIT` 默认接续消息
 - 传任意非空文本：完整替换默认接续消息
 - 传 `""`：**完全跳过**追加，模型会从 prefill 静默接续（适用场景：prefill 自身已经在引导对话）
 
