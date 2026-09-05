@@ -1,5 +1,5 @@
 {
-  "name": "mini-coding-agent",
+  "name": "c-agent",
   "version": "0.1.0",
   "private": true,
   "description": "TypeScript 实现的编码代理：外层/内层双循环、统一大模型接口、可插拔工具",
