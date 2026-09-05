@@ -120,7 +120,7 @@ test("read: 行号与 offset/limit", async () => {
 
 // --------------------------------------------------------------- write
 
-test("write: 自动创建目录", async () => {
+test("write: 自动创建目录，且允许写入 cwd 之外的路径", async () => {
   const dir = await tempDir();
   const result = await writeTool.execute(
     { path: "deep/nested/x.txt", content: "hi" },
@@ -129,11 +129,18 @@ test("write: 自动创建目录", async () => {
   assert.equal(result.isError, false);
   assert.equal(await fs.readFile(path.join(dir, "deep/nested/x.txt"), "utf8"), "hi");
 
+  // 路径围栏已移除：cwd 之外可以正常写入，与 read / bash 的行为保持一致
+  const escape = path.join(path.dirname(dir), `escape-${path.basename(dir)}.txt`);
   const outside = await writeTool.execute(
-    { path: "../escape.txt", content: "nope" },
+    { path: escape, content: "outside" },
     { cwd: dir, signal: noSignal() },
   );
-  assert.equal(outside.isError, true);
+  assert.equal(outside.isError, false);
+  try {
+    assert.equal(await fs.readFile(escape, "utf8"), "outside");
+  } finally {
+    await fs.rm(escape, { force: true });
+  }
 });
 
 // ---------------------------------------------------------------- edit

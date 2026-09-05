@@ -15,19 +15,13 @@ const IGNORED_DIRS = new Set([
   "vendor",
 ]);
 
-/** 相对路径按 cwd 解析，绝对路径原样返回；禁止逃出 cwd 之外的 .. 穿越 */
+/** 相对路径按 cwd 解析，绝对路径原样返回；~ 展开为家目录 */
 export function resolvePath(cwd: string, input: string): string {
   const expanded = input.startsWith("~")
     ? path.join(process.env["HOME"] ?? "", input.slice(1))
     : input;
   const abs = path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
   return path.normalize(abs);
-}
-
-export function assertInsideCwd(cwd: string, abs: string): string | null {
-  const root = path.resolve(cwd);
-  if (abs === root || abs.startsWith(root + path.sep)) return null;
-  return `拒绝访问 cwd 之外的路径：${abs}`;
 }
 
 export function truncateText(text: string, maxChars: number): string {

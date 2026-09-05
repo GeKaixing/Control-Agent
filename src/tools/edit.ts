@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { assertInsideCwd, resolvePath } from "./fs-utils.js";
+import { resolvePath } from "./fs-utils.js";
 import type { Tool } from "./types.js";
 import { fail, ok } from "./types.js";
 
@@ -32,9 +32,6 @@ export const editTool: Tool = {
 
   async execute(args, ctx) {
     const target = resolvePath(ctx.cwd, String(args["path"] ?? ""));
-    const guard = assertInsideCwd(ctx.cwd, target);
-    if (guard !== null) return fail(guard);
-
     const oldString = String(args["oldString"] ?? "");
     const newString = String(args["newString"] ?? "");
     if (oldString.length === 0) return fail("oldString 不能为空");

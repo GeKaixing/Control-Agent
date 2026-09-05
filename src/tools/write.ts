@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { assertInsideCwd, resolvePath } from "./fs-utils.js";
+import { resolvePath } from "./fs-utils.js";
 import type { Tool } from "./types.js";
 import { fail, ok } from "./types.js";
 
@@ -20,9 +20,6 @@ export const writeTool: Tool = {
 
   async execute(args, ctx) {
     const target = resolvePath(ctx.cwd, String(args["path"] ?? ""));
-    const guard = assertInsideCwd(ctx.cwd, target);
-    if (guard !== null) return fail(guard);
-
     const content = String(args["content"] ?? "");
     try {
       await fs.mkdir(path.dirname(target), { recursive: true });
