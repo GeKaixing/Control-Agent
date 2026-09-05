@@ -4,8 +4,9 @@
  */
 
 import type { StreamEvent, StreamFn, StreamOptions } from "../providers/types.js";
-import { describeToolsForModel, type Tool, type ToolResult } from "../tools/index.js";
+import { describeToolsForModel, type Tool, type ToolName, type ToolResult } from "../tools/index.js";
 import { fail } from "../tools/types.js";
+import { truncateText } from "../tools/fs-utils.js";
 import { validateParams } from "../tools/validate.js";
 import type {
   AssistantMessage,
@@ -47,7 +48,13 @@ export interface AgentOptions {
   maxToolRounds?: number;
   /** 多个只读工具是否并行执行 */
   allowParallelTools?: boolean;
+  /** 黑名单：被禁用的工具即使注册了，模型调用时也会返回错误 */
+  disabledTools?: ToolName[];
+  /** 单次工具返回结果的最大字符数；超出按头/尾截断。默认 50000 */
+  maxToolResultChars?: number;
 }
+
+const DEFAULT_MAX_TOOL_RESULT_CHARS = 50_000;
 
 const STEERING_PREFIX = "[中途插入指令] ";
 const MAX_REPEATED_FAILURES = 3;
@@ -69,6 +76,8 @@ export class Agent {
   private running = false;
   private toolRounds = 0;
   private readonly failureCounts = new Map<string, number>();
+  private readonly disabledTools: Set<string>;
+  private readonly maxToolResultChars: number;
 
   constructor(options: AgentOptions) {
     this.state = options.state;
@@ -78,6 +87,8 @@ export class Agent {
     this.transformOptions = options.transform;
     this.maxToolRounds = options.maxToolRounds ?? 50;
     this.allowParallelTools = options.allowParallelTools ?? true;
+    this.disabledTools = new Set(options.disabledTools ?? []);
+    this.maxToolResultChars = options.maxToolResultChars ?? DEFAULT_MAX_TOOL_RESULT_CHARS;
   }
 
   get isRunning(): boolean {
@@ -274,8 +285,9 @@ export class Agent {
       const tool = this.lookupTool(call.name);
       let result: ToolResult;
       if (tool === undefined) {
+        const reason = this.disabledTools.has(call.name) ? "已被禁用" : "未知";
         result = fail(
-          `未知工具：${call.name}。可用工具：${this.state.tools.map((t) => t.name).join(", ")}`,
+          `${reason}工具：${call.name}。可用工具：${this.availableToolNames().join(", ")}`,
         );
       } else {
         const checked = validateParams(tool.parameters, call.arguments);
@@ -315,7 +327,7 @@ export class Agent {
         role: "toolResult",
         toolCallId: call.id,
         toolName: call.name,
-        content: result.content,
+        content: this.maybeTruncateResult(call.name, result.content),
         isError: result.isError,
         timestamp: Date.now(),
       };
@@ -325,9 +337,22 @@ export class Agent {
     return outcomes;
   }
 
-  /** 工具查找优先走代理自己注册的工具表 */
+  /** 单次工具结果超长时按头/尾截断，避免单条撑爆上下文 */
+  private maybeTruncateResult(toolName: string, content: ToolResult["content"]): ToolResult["content"] {
+    const text = content.map((c) => c.text).join("");
+    if (text.length <= this.maxToolResultChars) return content;
+    return [{ type: "text", text: `[${toolName} 输出已截断，原长度 ${text.length} 字符]\n\n${truncateText(text, this.maxToolResultChars)}` }];
+  }
+
+  /** 工具查找优先走代理自己注册的工具表；被禁用的工具返回 undefined */
   private lookupTool(name: string): Tool | undefined {
+    if (this.disabledTools.has(name)) return undefined;
     return this.state.tools.find((t) => t.name === name);
+  }
+
+  /** 列出当前可用的工具名（用于告诉模型哪些能用） */
+  private availableToolNames(): string[] {
+    return this.state.tools.map((t) => t.name).filter((n) => !this.disabledTools.has(n));
   }
 
   /** 同一个调用连续失败 3 次即判定无解 */

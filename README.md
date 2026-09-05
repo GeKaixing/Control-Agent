@@ -147,7 +147,9 @@ npm run typecheck  # tsc --noEmit
 
 ## 扩展
 
-**加工具**：在 `src/tools/` 下实现 `Tool` 接口（`name` / `description` / `parameters` / `execute`，会改文件的加 `isMutating: true`），然后注册进 `src/tools/index.ts` 的 `allTools`。
+**加工具**：在 `src/tools/` 下实现 `Tool` 接口（`name` / `description` / `parameters` / `execute`，会改文件的加 `isMutating: true`），然后注册进 `src/tools/index.ts` 的 `_registry` 对象。`ToolName` 联合和 `findTool()` 签名都会自动跟着更新。
+
+**禁用某些工具**：`AgentOptions.disabledTools` 接受 `ToolName[]`，模型调用列表里的工具会收到「已被禁用」错误，不会真的执行。
 
 **加模型供应商**：在 `src/providers/` 下实现 `StreamFn`（产出 `StreamEvent` 的异步生成器），在 `providers/index.ts` 的 `providers` 表里登记，并把 `ProviderId` 补进 `src/types.ts`。
 

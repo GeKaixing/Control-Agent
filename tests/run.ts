@@ -14,7 +14,7 @@ import { convertToLlm } from "../src/agent/convert.js";
 import { createInitialState } from "../src/agent/state.js";
 import { createMockStream } from "../src/providers/mock.js";
 import type { StreamFn, StreamOptions } from "../src/providers/types.js";
-import { allTools, bashTool, editTool, globTool, grepTool, readTool, writeTool } from "../src/tools/index.js";
+import { allTools, bashTool, editTool, globTool, grepTool, readTool, writeTool, type ToolName } from "../src/tools/index.js";
 import type { Tool } from "../src/tools/types.js";
 import { ok } from "../src/tools/types.js";
 import { globToRegExp, matchesGlob } from "../src/tools/glob-matcher.js";
@@ -320,6 +320,8 @@ async function runAgent(options: {
   stream?: StreamFn;
   tools?: Tool[];
   allowParallelTools?: boolean;
+  disabledTools?: ToolName[];
+  maxToolResultChars?: number;
 }): Promise<{ events: AgentEvent[]; messages: AgentMessage[]; durationMs: number }> {
   const model: ModelRef = { provider: "mock", id: "mock-1" };
   const state = createInitialState({
@@ -328,13 +330,15 @@ async function runAgent(options: {
     tools: options.tools ?? allTools,
   });
   const events: AgentEvent[] = [];
+  const extra: { allowParallelTools?: boolean; disabledTools?: ToolName[]; maxToolResultChars?: number } = {};
+  if (options.allowParallelTools !== undefined) extra.allowParallelTools = options.allowParallelTools;
+  if (options.disabledTools !== undefined) extra.disabledTools = options.disabledTools;
+  if (options.maxToolResultChars !== undefined) extra.maxToolResultChars = options.maxToolResultChars;
   const agent = new Agent({
     state,
     stream: options.stream ?? createMockStream({ delayMs: 0 }),
     onEvent: (e) => events.push(e),
-    ...(options.allowParallelTools === undefined
-      ? {}
-      : { allowParallelTools: options.allowParallelTools }),
+    ...extra,
   });
 
   agent.enqueueUser(options.prompt);
@@ -476,6 +480,130 @@ test("串行 / 并行：只读工具可并行，开关可强制串行", async ()
     serial.durationMs >= 480,
     `串行执行应慢于 480ms，实际 ${serial.durationMs}ms`,
   );
+});
+
+test("端到端：disabledTools 黑名单里的工具调用会返回 '已被禁用' 错误", async () => {
+  const dir = await tempDir();
+  // 自定义 stream 强制调用 bash（无论 prompt 里有什么关键词）
+  const stream: StreamFn = async function* () {
+    const call: ToolCallContent = {
+      type: "toolCall",
+      id: "c1",
+      name: "bash",
+      arguments: { command: "echo should-not-run" },
+    };
+    const partial: AssistantMessage = {
+      role: "assistant",
+      content: [call],
+      model: "mock:mock-1",
+      stopReason: "toolUse",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      timestamp: Date.now(),
+    };
+    yield { type: "toolcall_end", toolCall: call, partial };
+    yield { type: "done", reason: "toolUse", message: partial };
+  };
+  const { messages } = await runAgent({
+    cwd: dir,
+    prompt: "x",
+    stream,
+    disabledTools: ["bash"],
+  });
+
+  const bashError = messages.find(
+    (m) => m.role === "toolResult" && m.toolName === "bash",
+  );
+  assert.ok(bashError && bashError.role === "toolResult", "应有针对 bash 的工具结果");
+  assert.equal(bashError.isError, true);
+  assert.match(bashError.content[0]?.text ?? "", /已被禁用/);
+  // 「可用工具：」列表里不应再出现 bash
+  const available = bashError.content[0]?.text.split("可用工具：")[1] ?? "";
+  assert.equal(available.split(/[\s,，]+/).includes("bash"), false);
+});
+
+test("端到端：超过 maxToolResultChars 的工具结果会被截断", async () => {
+  const dir = await tempDir();
+  const hugeTool: Tool = {
+    name: "huge",
+    description: "返回大字符串的测试工具",
+    parameters: { type: "object", properties: {}, required: [] },
+    isMutating: false,
+    async execute() {
+      return ok("A".repeat(20_000));
+    },
+  };
+  // 自定义 stream 强制调用 hugeTool
+  const stream: StreamFn = async function* () {
+    const call: ToolCallContent = {
+      type: "toolCall",
+      id: "h1",
+      name: "huge",
+      arguments: {},
+    };
+    const partial: AssistantMessage = {
+      role: "assistant",
+      content: [call],
+      model: "mock:mock-1",
+      stopReason: "toolUse",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      timestamp: Date.now(),
+    };
+    yield { type: "toolcall_end", toolCall: call, partial };
+    yield { type: "done", reason: "toolUse", message: partial };
+  };
+  const { messages } = await runAgent({
+    cwd: dir,
+    prompt: "x",
+    stream,
+    tools: [hugeTool],
+    maxToolResultChars: 500,
+  });
+
+  const toolResult = messages.find((m) => m.role === "toolResult");
+  assert.ok(toolResult && toolResult.role === "toolResult");
+  const text = toolResult.content.map((c) => c.text).join("");
+  assert.ok(text.length < 1000, `截断后应远小于原长 20000，实际 ${text.length}`);
+  assert.match(text, /输出已截断/);
+  assert.match(text, /A{50,}/, "应保留 A 字符内容");
+});
+
+test("registry：拼写错误的工具名会在 runAgent 路径上走 '未知工具'", async () => {
+  // 这条用例保护：即使将来 TOOL_REGISTRY 改名，调用方拼错名字时仍走 fail，
+  // 而不是默默得到 undefined 再让 executeToolCalls 崩。
+  const dir = await tempDir();
+  let fired = false;
+  const bogus: StreamFn = async function* (_options: StreamOptions) {
+    if (fired) {
+      yield { type: "done", reason: "stop", message: textOnly("done") };
+      return;
+    }
+    fired = true;
+    const call: ToolCallContent = {
+      type: "toolCall",
+      id: "c1",
+      name: "typo_tool",
+      arguments: {},
+    };
+    const partial: AssistantMessage = {
+      role: "assistant",
+      content: [call],
+      model: "mock:mock-1",
+      stopReason: "toolUse",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      timestamp: Date.now(),
+    };
+    yield { type: "toolcall_end", toolCall: call, partial };
+    yield { type: "done", reason: "toolUse", message: partial };
+  };
+  const { messages } = await runAgent({
+    cwd: dir,
+    prompt: "x",
+    stream: bogus,
+  });
+  const toolResult = messages.find((m) => m.role === "toolResult");
+  assert.ok(toolResult && toolResult.role === "toolResult");
+  assert.equal(toolResult.isError, true);
+  assert.match(toolResult.content[0]?.text ?? "", /未知工具/);
 });
 
 // ----------------------------------------------------------------- print

@@ -55,10 +55,34 @@
    };
    ```
 
-2. 注册进 `src/tools/index.ts` 的 `allTools` 数组，并补上导出。
+2. 注册进 `src/tools/index.ts` 的 `_registry` 对象（**不是数组**，单源真相是 `_registry`）。
+
+   ```ts
+   const _registry = {
+     read: readTool,
+     write: writeTool,
+     edit: editTool,
+     bash: bashTool,
+     glob: globTool,
+     grep: grepTool,
+     foo: fooTool,   // ← 这里加一行
+   } as const;
+   ```
+
+   `ToolName` 联合从 `_registry` 自动派生（`keyof typeof _registry`）。
+   `findTool(name: ToolName)` 的参数因此编译期收紧——拼错立刻报错。
+   `_registry` 顶部还有 `_AllAreTools` 类型断言，确保每个值 implements `Tool`。
 
 `isMutating` 很关键：一批调用里只要有一个是 `true`，整批就退回串行执行。
 只读工具标成 `true` 会白白牺牲并行，会改文件的标成 `false` 则可能并发写坏东西。
+
+## 临时禁用某些工具
+
+`AgentOptions.disabledTools?: ToolName[]` 接受一个名字数组，模型调用这些工具时会收到「已被禁用」错误（不会真的执行），可用工具列表里也会被剔除。常用于：让代理只读（`["write", "edit", "bash"]`）、强制只走 shell（`["write", "edit"]`）。
+
+## 单次工具结果截断
+
+`AgentOptions.maxToolResultChars?: number`（默认 50 000）：单条工具返回文本超过这个上限会被按头/尾截断，写入消息前完成。这与 `transformContext` 里的 `maxToolResultChars` 是不同机制——前者管「新写入」，后者管「旧轮次裁剪」。
 
 ## 加一个模型供应商
 
