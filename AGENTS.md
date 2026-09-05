@@ -10,6 +10,77 @@
 
 架构细节、工具清单、上下文管理策略见 [README.md](README.md)。
 
+## 项目结构
+
+### 数据流（外层 ↔ 内层）
+
+```mermaid
+graph TD
+  User([用户]) --> Index[index.ts<br/>parseArgs + main]
+  Index -->|有 TTY| Input[ui/input.ts<br/>readline REPL]
+  Index -->|管道或 -p| Print[ui/print.ts<br/>单轮 + 收敛成答案]
+  Input --> Agent
+  Print --> Agent
+  Index --> Agent[agent/agent.ts<br/>外层 user · 内层 model↔tool]
+  Agent -->|stream 调用| Providers[providers/*<br/>openai / anthropic / mock]
+  Agent -->|tool 调用| Tools[tools/_registry<br/>read·write·edit·bash·glob·grep]
+  Agent -->|AgentEvent| Renderer[ui/renderer.ts<br/>终端着色输出]
+  Agent -->|notice/done/error| Index
+```
+
+### 文件树（已排除 node_modules / dist / .workbuddy / *.log / .DS_Store）
+
+```
+g/
+├── AGENTS.md           本文件：仓库约定、扩展流程、已知坑
+├── README.md           架构图、工具表、print 用法、扩展指引
+├── package.json
+├── tsconfig.json       strict + NodeNext + verbatimModuleSyntax
+├── src/
+│   ├── index.ts                CLI 入口，TTY / 管道 / -p 三路分发
+│   ├── types.ts                全局共享类型（ModelRef / Message / TextContent）
+│   ├── agent/                  唯一的调度状态机
+│   │   ├── agent.ts              外层 enqueue + 内层 model↔tool 循环
+│   │   ├── state.ts              messages / tools / usage 累计
+│   │   ├── queue.ts              MessageQueue（中途指令合并）
+│   │   ├── context.ts            transformContext：清理→压缩→裁剪
+│   │   └── convert.ts            Anthropic ⇄ 内部消息互转
+│   ├── providers/              模型适配器（缺 key 自动降级 mock）
+│   │   ├── stream.ts             StreamAccumulator（流式 → 完整消息）
+│   │   ├── types.ts              StreamEvent / StreamFn / JsonSchema
+│   │   ├── openai.ts             OpenAI 兼容，BASE_URL 可覆写
+│   │   ├── anthropic.ts          Anthropic API
+│   │   ├── mock.ts               离线测试与 print 模式
+│   │   └── index.ts              resolveModel + providers 表
+│   ├── tools/                  6 个内置工具
+│   │   ├── types.ts              Tool 接口 + ok() / fail()
+│   │   ├── validate.ts           JSON Schema 参数校验
+│   │   ├── fs-utils.ts           resolvePath / truncateText / 跳过隐藏目录
+│   │   ├── glob-matcher.ts       glob 模式 → 正则
+│   │   ├── read.ts
+│   │   ├── write.ts
+│   │   ├── edit.ts
+│   │   ├── bash.ts               超时 + 输出截断（默认 120s/100K 字符）
+│   │   ├── glob.ts               走 fs-utils 的 walk
+│   │   ├── grep.ts               ripgrep 后端
+│   │   └── index.ts              TOOL_REGISTRY + ToolName 派生源
+│   └── ui/                     终端交互
+│       ├── input.ts              InputController（readline + ctrl-c）
+│       ├── renderer.ts           AgentEvent → 终端着色
+│       └── print.ts              -p / 管道 / 缺 TTY 走这条
+└── tests/
+    └── run.ts                零依赖运行器，当前 20 个用例
+```
+
+### 各目录一行职责
+
+- **index.ts** — 解析 CLI 参数，决定走交互 REPL、print 单轮还是 help
+- **agent/** — 项目的核心；外层等用户输入，内层跑模型 ↔ 工具直到模型给出终态
+- **providers/** — 把各家厂商的流式协议收敛成同一个 `StreamFn`，加供应商只需在这里挂一份
+- **tools/** — 6 个内置工具的注册与共享辅助
+- **ui/** — 渲染器只读 `AgentEvent`，不知道「模型」或「工具」是谁
+- **tests/run.ts** — 端到端 + 单元 + 边界，靠 `node:assert/strict`，无第三方依赖
+
 ## 常用命令
 
 | 命令 | 作用 |
