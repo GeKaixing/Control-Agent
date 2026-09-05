@@ -12,7 +12,7 @@ import { Agent, type AgentEvent } from "../src/agent/agent.js";
 import { transformContext } from "../src/agent/context.js";
 import { convertToLlm } from "../src/agent/convert.js";
 import { createInitialState } from "../src/agent/state.js";
-import { activeBranch, addNodeAt, appendNode, pathToRoot, switchTo } from "../src/agent/state.js";
+import { activeBranch, addNodeAt, appendNode, currentNode, pathToRoot, switchTo } from "../src/agent/state.js";
 import { createMockStream } from "../src/providers/mock.js";
 import type { StreamFn, StreamOptions } from "../src/providers/types.js";
 import { allTools, bashTool, editTool, globTool, grepTool, readTool, writeTool, type ToolName } from "../src/tools/index.js";
@@ -418,6 +418,105 @@ test("tree: pathToRoot 安全处理坏 id", () => {
   // 不存在的 id：应当返回 [] 而不抛错
   assert.deepEqual(pathToRoot(state, "non-existent"), []);
   assert.deepEqual(pathToRoot(state, null), []);
+});
+
+// --------------------------------------------------- prompts 注入
+
+test("prompts: createInitialState 不传 append 时与原行为一致", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  // 没传 append 时 systemPrompt 就是 buildSystemPrompt 默认值
+  assert.ok(state.systemPrompt.includes("你是一个在终端里工作的编码代理。"));
+  assert.ok(!state.systemPrompt.includes("# 追加指令"));
+});
+
+test("prompts: appendSystemPrompt 会在默认系统提示词后追加 # 追加指令 段", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+    appendSystemPrompt: "只能用一句话回答。",
+  });
+  assert.ok(state.systemPrompt.includes("# 追加指令"));
+  assert.ok(state.systemPrompt.endsWith("只能用一句话回答。"));
+});
+
+test("prompts: appendSystemPrompt 空字符串等同未传，不会污染默认段", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+    appendSystemPrompt: "",
+  });
+  assert.ok(!state.systemPrompt.includes("# 追加指令"));
+});
+
+test("prompts: systemPrompt 完整替换默认；append 在替换值之后仍生效", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+    systemPrompt: "你是复读机，只回显用户输入。",
+    appendSystemPrompt: "末尾规则。",
+  });
+  // 被替换的默认字符不应出现
+  assert.ok(!state.systemPrompt.includes("你是一个在终端里工作的编码代理。"));
+  // 替换值 + 追加段都应在
+  assert.ok(state.systemPrompt.startsWith("你是复读机"));
+  assert.ok(state.systemPrompt.endsWith("末尾规则。"));
+});
+
+test("prompts: seedMessages 把 user / assistant 注入到会话树最前面", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+    seedMessages: [
+      { role: "user", content: "你好" },
+      { role: "assistant", content: "在的。" },
+    ],
+  });
+  assert.equal(state.messages.length, 2);
+  assert.equal(state.messages[0]?.role, "user");
+  assert.equal(state.messages[1]?.role, "assistant");
+  // ★ 推进到 assistant 节点
+  const current = currentNode(state);
+  assert.ok(current?.message.role === "assistant");
+  assert.equal(state.rootId !== null, true);
+});
+
+test("prompts: transformContext 能看到 seedMessages 注入的 prefill", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+    seedMessages: [
+      { role: "user", content: "u" },
+      { role: "assistant", content: "好的，" },
+    ],
+  });
+  const ctx = transformContext(state);
+  // prefill 不能凭空出现；必须有 user 开头
+  assert.equal(ctx.messages[0]?.role, "user");
+  // prefill 必须出现在 user 之后
+  assert.ok(ctx.messages.some((m) => m.role === "assistant"));
+});
+
+test("prompts: appendSystemPrompt 与 seedMessages 同时使用，互不冲突", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+    appendSystemPrompt: "末尾规则。",
+    seedMessages: [{ role: "user", content: "你好" }],
+  });
+  assert.ok(state.systemPrompt.includes("# 追加指令"));
+  assert.ok(state.systemPrompt.endsWith("末尾规则。"));
+  assert.equal(state.messages.length, 1);
+  assert.equal(state.messages[0]?.role === "user" ? state.messages[0].content : "", "你好");
 });
 
 // ------------------------------------------------------------- 端到端

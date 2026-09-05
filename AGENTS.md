@@ -69,7 +69,7 @@ g/
 │       ├── renderer.ts           AgentEvent → 终端着色
 │       └── print.ts              -p / 管道 / 缺 TTY 走这条
 └── tests/
-    └── run.ts                零依赖运行器，当前 20 个用例
+    └── run.ts                零依赖运行器，当前 31 个用例
 ```
 
 ### 各目录一行职责
@@ -384,6 +384,20 @@ test("用一句话说明验证什么", async () => {
 `tempDir()` 开临时目录。
 
 端到端测试用 `createMockStream({ delayMs: 0 })`，不依赖网络也不需要 API key。
+
+## 提示词覆盖（CLI 注入）
+
+`createInitialState` 支持三个可选字段，CLI 把它们映射到四个标志：
+
+| `createInitialState` 字段 | CLI 标志 | 作用 |
+| --- | --- | --- |
+| `systemPrompt` | `--system-prompt` / `-sp` | 完全替换 `buildSystemPrompt()` 的默认输出 |
+| `appendSystemPrompt` | `--append-system-prompt` / `-asp` | 在默认系统提示词末尾追加 `# 追加指令` 段；空字符串等同未传 |
+| `seedMessages` | `--user-prompt` / `-up` + `--assistant-prompt` / `-ap` | 在会话树最前面按序注入种子消息（`role: "user"` 或 `role: "assistant"`） |
+
+`state.systemPrompt: string` 始终是「最终拼好的串」——base + 可选 append 段。`appendNode` 在 init 时跑完 `seedMessages` 里的每条，所以后续 `agent.run()` 看到的就是含种子的树。
+
+`--assistant-prompt`（prefill）的语义：跟在 user 消息之后注入，模型会从这里接续。CLI 在 prefill 之后会自动追加一条用户消息 `[c-agent prefill] 请基于上一条助手消息继续。` 触发接续轮次；所以 `--assistant-prompt` 不允许单独使用——必须配合 `--user-prompt`。
 
 ## 注意事项 / 已知的坑
 

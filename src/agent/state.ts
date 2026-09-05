@@ -11,7 +11,20 @@
  */
 
 import type { Tool } from "../tools/types.js";
-import type { AgentMessage, ModelRef, ThinkingLevel } from "../types.js";
+import type { AgentMessage, AssistantMessage, ModelRef, ThinkingLevel, UserMessage } from "../types.js";
+import { emptyUsage } from "../types.js";
+
+/**
+ * 种子消息：在 `createInitialState` 时按顺序注入到会话树的最前面。
+ * 主要服务于 CLI 的 `--user-prompt` 与 `--assistant-prompt`。
+ *
+ * - `role: "user"`：当作用户消息写入
+ * - `role: "assistant"`：当作助手 prefill 写入（模型会从这里接续）
+ */
+export interface SeedMessage {
+  role: "user" | "assistant";
+  content: string;
+}
 
 /** 单条消息在树中的位置：每个节点携带 parent 指针指向其上游节点 */
 export interface MessageNode {
@@ -65,12 +78,26 @@ export function createInitialState(options: {
   model: ModelRef;
   tools: Tool[];
   thinkingLevel?: ThinkingLevel;
+  /** 完整替换默认系统提示词 */
   systemPrompt?: string;
+  /**
+   * 追加到默认系统提示词末尾（在「可用工具」一节之后）。空字符串等同于不传。
+   * 多个来源叠加时用换行 + `# 追加指令` 段拼接，模型能明显看到这是后加的。
+   */
+  appendSystemPrompt?: string;
+  /**
+   * 种子消息：按顺序注入到会话树最前面。user 角色作为初始 user 消息，
+   * assistant 角色作为 prefill（模型会从这里接续）。
+   */
+  seedMessages?: SeedMessage[];
 }): AgentState {
-  return {
-    systemPrompt:
-      options.systemPrompt ??
-      buildSystemPrompt(options.cwd, options.tools.map((t) => t.name)),
+  const base = options.systemPrompt ?? buildSystemPrompt(options.cwd, options.tools.map((t) => t.name));
+  const append = options.appendSystemPrompt ?? "";
+  const composedSystemPrompt =
+    append.length > 0 ? `${base}\n\n# 追加指令\n\n${append}` : base;
+
+  const state: AgentState = {
+    systemPrompt: composedSystemPrompt,
     model: options.model,
     nodes: new Map(),
     currentNodeId: null,
@@ -79,6 +106,38 @@ export function createInitialState(options: {
     tools: options.tools,
     thinkingLevel: options.thinkingLevel ?? "low",
     cwd: options.cwd,
+  };
+
+  if (options.seedMessages !== undefined) {
+    for (const seed of options.seedMessages) {
+      const message: AgentMessage =
+        seed.role === "user"
+          ? userMessage(seed.content)
+          : assistantPrefill(seed.content, options.model);
+      appendNode(state, message);
+    }
+  }
+
+  return state;
+}
+
+/** 把字符串包成 UserMessage，timestamp 由当前时间生成 */
+function userMessage(content: string): UserMessage {
+  return { role: "user", content, timestamp: Date.now() };
+}
+
+/**
+ * 把字符串包成 AssistantMessage，作为 prefill 注入。
+ * 注意：prefill 必须跟在 user 消息后面才有意义，调用方需要保证顺序。
+ */
+function assistantPrefill(content: string, model: ModelRef): AssistantMessage {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text: content }],
+    model: `${model.provider}:${model.id}`,
+    stopReason: "stop",
+    usage: emptyUsage(),
+    timestamp: Date.now(),
   };
 }
 

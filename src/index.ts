@@ -40,6 +40,13 @@ const HELP = [
   "退出码：0 成功，1 代理出错或无输出，2 缺少提示词。",
   "",
   "代理运行期间直接输入的文字会作为「中途插入指令」，在下一轮工具往返时生效。",
+  "",
+  "提示词覆盖（print 模式用一次；交互模式会在进 REPL 前先跑一轮）：",
+  "  --system-prompt,        -sp   完全替换默认系统提示词",
+  "  --append-system-prompt, -asp  在默认系统提示词末尾追加一段指令",
+  "  --user-prompt,          -up   显式传入用户提示词（与位置参数互斥，二选一）",
+  "  --assistant-prompt,     -ap   注入一段助手 prefill，必须与 --user-prompt 同用",
+  "                            注入后会追加一条用户消息触发「接续」轮次。",
 ].join("\n");
 
 interface CliArgs {
@@ -50,6 +57,14 @@ interface CliArgs {
   print: boolean;
   /** 位置参数拼起来的提示词，print 模式用它作为一次性输入 */
   prompt: string;
+  /** 完全替换默认系统提示词 */
+  systemPrompt: string | null;
+  /** 在默认系统提示词末尾追加指令 */
+  appendSystemPrompt: string | null;
+  /** 显式用户提示词（与位置参数互斥） */
+  userPrompt: string | null;
+  /** 助手 prefill（必须与 userPrompt 同用） */
+  assistantPrompt: string | null;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -60,6 +75,10 @@ function parseArgs(argv: string[]): CliArgs {
     help: false,
     print: false,
     prompt: "",
+    systemPrompt: null,
+    appendSystemPrompt: null,
+    userPrompt: null,
+    assistantPrompt: null,
   };
   const positional: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -69,10 +88,54 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === "--verbose" || a === "-v") args.verbose = true;
     else if (a === "--help" || a === "-h") args.help = true;
     else if (a === "--print" || a === "-p") args.print = true;
+    else if (a === "--system-prompt" || a === "-sp") args.systemPrompt = argv[++i] ?? "";
+    else if (a === "--append-system-prompt" || a === "-asp") args.appendSystemPrompt = argv[++i] ?? "";
+    else if (a === "--user-prompt" || a === "-up") args.userPrompt = argv[++i] ?? "";
+    else if (a === "--assistant-prompt" || a === "-ap") args.assistantPrompt = argv[++i] ?? "";
     else if (a !== undefined) positional.push(a);
   }
   args.prompt = positional.join(" ").trim();
   return args;
+}
+
+/**
+ * 把 CLI 参数翻译成 `createInitialState` 的 `seedMessages`。
+ * 规则：
+ * - `--user-prompt` 与位置参数互斥，二选一；同时给出会报错并打印帮助
+ * - `--assistant-prompt` 必须与 `--user-prompt` 同用；后面会追加一条
+ *   「请基于上一条助手消息继续」的用户消息触发接续轮次
+ */
+function buildSeedMessages(
+  args: CliArgs,
+  promptSource: { prompt: string },
+): { seeds: { role: "user" | "assistant"; content: string }[]; error?: string } {
+  const seeds: { role: "user" | "assistant"; content: string }[] = [];
+  const hasUserPrompt = args.userPrompt !== null && args.userPrompt.length > 0;
+  const hasPositional = promptSource.prompt.length > 0;
+  const hasAssistantPrompt = args.assistantPrompt !== null && args.assistantPrompt.length > 0;
+
+  if (hasUserPrompt && hasPositional) {
+    return {
+      seeds: [],
+      error: "--user-prompt 与位置参数互斥，请二选一。",
+    };
+  }
+  if (hasAssistantPrompt && !hasUserPrompt) {
+    return {
+      seeds: [],
+      error: "--assistant-prompt 必须与 --user-prompt 同用：prefill 需要跟在 user 消息之后。",
+    };
+  }
+
+  if (hasUserPrompt) {
+    seeds.push({ role: "user", content: args.userPrompt ?? "" });
+  }
+  if (hasAssistantPrompt) {
+    seeds.push({ role: "assistant", content: args.assistantPrompt ?? "" });
+    seeds.push({ role: "user", content: "[c-agent prefill] 请基于上一条助手消息继续。" });
+  }
+
+  return { seeds };
 }
 
 /**
@@ -122,7 +185,20 @@ async function main(): Promise<number> {
   const model: ModelRef = args.model !== undefined ? parseModelSpec(args.model) : defaultModel();
   let resolved = resolveModel(model);
 
-  const state = createInitialState({ cwd, model: resolved.model, tools: allTools });
+  const seedResult = buildSeedMessages(args, { prompt: args.prompt });
+  if (seedResult.error !== undefined) {
+    console.error(`错误：${seedResult.error}`);
+    return 2;
+  }
+
+  const state = createInitialState({
+    cwd,
+    model: resolved.model,
+    tools: allTools,
+    ...(args.systemPrompt !== null ? { systemPrompt: args.systemPrompt } : {}),
+    ...(args.appendSystemPrompt !== null ? { appendSystemPrompt: args.appendSystemPrompt } : {}),
+    ...(seedResult.seeds.length > 0 ? { seedMessages: seedResult.seeds } : {}),
+  });
   const queue = new MessageQueue();
   let verbose = args.verbose;
 
@@ -132,7 +208,9 @@ async function main(): Promise<number> {
     const sink = createPrintOutput();
     onEvent = (event: AgentEvent): void => sink.onEvent(event);
 
-    const prompt = await resolvePrompt(args.prompt, stdinIsTty);
+    // seed 已有 user 提示词时不再额外 enqueue
+    const hasSeedUser = seedResult.seeds.some((s) => s.role === "user");
+    const prompt = hasSeedUser ? "" : await resolvePrompt(args.prompt, stdinIsTty);
     if (prompt === null) {
       console.error(
         "print 模式需要一个提示词：用位置参数传入（npm start -- -p \"你的问题\"），或通过管道/重定向喂给 stdin。",
@@ -142,7 +220,7 @@ async function main(): Promise<number> {
     if (resolved.degraded !== undefined) console.error(`提示：${resolved.degraded}`);
 
     const agent = new Agent({ state, queue, stream: resolved.stream, onEvent });
-    agent.enqueueUser(prompt);
+    if (prompt.length > 0) agent.enqueueUser(prompt);
     await agent.run();
 
     const answer = sink.answer.trim();
@@ -192,6 +270,11 @@ async function main(): Promise<number> {
   pump.unref();
 
   try {
+    // 启动时若提供了 user-prompt / assistant-prompt，先跑一轮（prefill 同理）
+    if (seedResult.seeds.length > 0) {
+      await agent.run();
+    }
+
     while (true) {
       const line = await input.ask("› ");
       const trimmed = line.trim();

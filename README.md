@@ -44,6 +44,10 @@ npm start -- --model anthropic:claude-3-7-sonnet-latest
 | `-p, --print`               | 非交互模式，只输出最终答案                      |
 | `-v, --verbose`             | 显示模型的思考过程                          |
 | `-h, --help`                | 显示帮助                               |
+| `--system-prompt, -sp <text>`     | 完全替换默认系统提示词                       |
+| `--append-system-prompt, -asp <text>` | 在默认系统提示词末尾追加一段指令               |
+| `--user-prompt, -up <text>`       | 显式传入用户提示词（与位置参数互斥）               |
+| `--assistant-prompt, -ap <text>`  | 注入一段助手 prefill；必须与 `--user-prompt` 同用 |
 
 交互模式下的斜杠命令：`/help` `/model <spec>` `/tools` `/usage` `/clear` `/verbose` `/exit`。  
 运行中按 Ctrl-C 中断当前任务，Ctrl-D 退出。
@@ -71,6 +75,24 @@ npm start -- -p "这个项目是干什么的" --model mock | pbcopy
 | `0` | 成功           |
 | `1` | 代理出错，或没有任何输出 |
 | `2` | 缺少提示词        |
+
+## 提示词覆盖
+
+```bash
+# 完全替换默认系统提示词
+npm start -- --model mock --system-prompt "你是复读机，只回显用户输入。" -p "hello"
+
+# 在默认段后追加指令
+npm start -- --model mock --append-system-prompt "回答保持一行以内。" -p "讲个笑话"
+
+# 显式传入用户提示词（与位置参数互斥）
+npm start -- --model mock --user-prompt "用一句话回答"
+
+# 注入助手 prefill：模型会从「好的，」接续
+npm start -- --model mock --user-prompt "用一句话回答" --assistant-prompt "好的，"
+```
+
+`-ap` 注入 prefill 后会自动追加一条用户消息（`[c-agent prefill] 请基于上一条助手消息继续。`），触发接续轮次。prefill 必须跟在 user 之后，所以 `--assistant-prompt` 不允许单独使用。
 
 ## 架构
 
@@ -139,7 +161,7 @@ tests/run.ts         零依赖测试运行器
 ## 测试
 
 ```bash
-npm test           # 17 个用例
+npm test           # 31 个用例
 npm run typecheck  # tsc --noEmit
 ```
 
