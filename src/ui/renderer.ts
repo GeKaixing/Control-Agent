@@ -2,6 +2,7 @@
 
 import type { AgentEvent } from "../agent/agent.js";
 import type { StreamEvent } from "../providers/types.js";
+import { createMarkdownStream, type MarkdownStream } from "./markdown.js";
 
 const DIM = "\x1b[2m";
 const CYAN = "\x1b[36m";
@@ -32,14 +33,22 @@ function formatArgs(args: Record<string, unknown>): string {
 
 export interface RendererOptions {
   verbose: boolean;
+  /**
+   * 是否把模型输出的 Markdown 渲染成带样式的终端文本。
+   * 默认 true；`--no-markdown` 或输出不是 TTY 时应关掉（转义序列会污染管道）。
+   */
+  markdown?: boolean;
 }
 
 export class TerminalRenderer {
   private verbose: boolean;
   private pendingNewline = false;
+  /** 流式 Markdown 渲染：按行攒，避免跨 delta 的标记被切坏 */
+  private md: MarkdownStream;
 
   constructor(options: RendererOptions) {
     this.verbose = options.verbose;
+    this.md = createMarkdownStream({ enabled: options.markdown ?? true });
   }
 
   /** 运行时切换是否显示思考过程（对应 /verbose 命令） */
@@ -48,6 +57,10 @@ export class TerminalRenderer {
   }
 
   handle(event: AgentEvent): void {
+    // 任何非文本事件之前，先把行缓冲里没吐完的半行 Markdown 冲出去，
+    // 否则工具调用行、用量行会插在一行文字中间
+    if (event.type !== "stream") this.flushText();
+
     switch (event.type) {
       case "agent_start":
         break;
@@ -118,12 +131,27 @@ export class TerminalRenderer {
     }
   }
 
+  /** 把流式 Markdown 缓冲里剩下的内容写完（收尾时调用） */
+  private flushText(): void {
+    const rest = this.md.end();
+    if (rest.length === 0) return;
+    process.stdout.write(rest);
+    this.pendingNewline = !rest.endsWith("\n");
+  }
+
   private handleStream(event: StreamEvent): void {
     switch (event.type) {
-      case "text_delta":
-        process.stdout.write(event.delta);
-        this.pendingNewline = !event.delta.endsWith("\n");
+      case "text_delta": {
+        const out = this.md.push(event.delta);
+        if (out.length === 0) {
+          // 一整行还没攒满，先不输出，但要知道「有文字在屏上」
+          this.pendingNewline = true;
+          break;
+        }
+        process.stdout.write(out);
+        this.pendingNewline = !out.endsWith("\n");
         break;
+      }
 
       case "thinking_delta":
         if (this.verbose) {

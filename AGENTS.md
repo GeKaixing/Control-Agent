@@ -41,10 +41,12 @@ g/
 │   ├── types.ts                全局共享类型（ModelRef / Message / TextContent）
 │   ├── agent/                  唯一的调度状态机
 │   │   ├── agent.ts              外层 enqueue + 内层 model↔tool 循环
-│   │   ├── state.ts              messages / tools / usage 累计
-│   │   ├── queue.ts              MessageQueue（中途指令合并）
-│   │   ├── context.ts            transformContext：清理→压缩→裁剪
 │   │   └── convert.ts            Anthropic ⇄ 内部消息互转
+│   ├── context/                模型真正看到的那份上下文
+│   │   ├── index.ts              统一出口，引用方只认这里
+│   │   ├── state.ts              会话状态 + 会话树（节点 / ★ / 分支）、token 与 usage
+│   │   ├── transform.ts          transformContext：清理→压缩→裁剪
+│   │   └── queue.ts              MessageQueue（中途指令合并）
 │   ├── providers/              模型适配器（缺 key 自动降级 mock）
 │   │   ├── stream.ts             StreamAccumulator（流式 → 完整消息）
 │   │   ├── types.ts              StreamEvent / StreamFn / JsonSchema
@@ -67,18 +69,21 @@ g/
 │   └── ui/                     终端交互
 │       ├── input.ts              InputController（readline + ctrl-c）
 │       ├── renderer.ts           AgentEvent → 终端着色
+│       ├── markdown.ts           Markdown → ANSI（流式按行攒 + 一次性渲染）
 │       └── print.ts              -p / 管道 / 缺 TTY 走这条
 └── tests/
-    └── run.ts                零依赖运行器，当前 38 个用例
+    └── run.ts                零依赖运行器，当前 46 个用例
 ```
 
 ### 各目录一行职责
 
 - **index.ts** — 解析 CLI 参数，决定走交互 REPL、print 单轮还是 help
 - **agent/** — 项目的核心；外层等用户输入，内层跑模型 ↔ 工具直到模型给出终态
+- **context/** — 上下文的全部实现：会话树存储、系统提示词、token 估算、交给模型前的三步后处理、消息入队
 - **providers/** — 把各家厂商的流式协议收敛成同一个 `StreamFn`，加供应商只需在这里挂一份
 - **tools/** — 6 个内置工具的注册与共享辅助
 - **ui/** — 渲染器只读 `AgentEvent`，不知道「模型」或「工具」是谁
+- **ui/markdown.ts** — 唯一知道 ANSI 转义序列的地方；`enabled: false` 时纯透传
 - **tests/run.ts** — 端到端 + 单元 + 边界，靠 `node:assert/strict`，无第三方依赖
 ## 会话运行时
 
@@ -163,7 +168,7 @@ sequenceDiagram
 ### `transformContext` 三步后处理
 
 每轮 `turn_end` 之后、内层循环继续前调 `transformContext(state.messages, transformOptions)`。
-三步顺序敏感（`src/agent/context.ts`）：
+三步顺序敏感（`src/context/transform.ts`）：
 
 1. **清理孤儿**：删除没有对应 `toolCall.id` 的 `toolResult`（异常流中断会留下）
 2. **压缩旧轮次**：保留深度之外的旧轮被摘要替换（默认保留深度很小，几乎全丢，只留骨架）
@@ -278,11 +283,13 @@ User #1 → Assistant #1 → User #3 → Assistant #3
 | LLM 看到的 = `★ → Root` 线性序列 | ✅ `transformContext` 用 `activeBranch(state)` 而不是 `state.messages` |
 | 反向遍历 | ✅ `pathToRoot(state, id)` 带环检测，坏 id 返回 `[]` |
 
-**诚实结论**：当前 c-agent 用 `messages[]` 数组**近似**这个树，能跑通所有内置功能，
-但**不支持**树状语义才有的能力——分支探索、回退重放、上下文切片、跨分支对比。
-要做到真的「会话是一棵树」，重构点是 `state.ts`（`messages: Message[]` → `nodes:
-Map<id, MessageNode>` + `parent: id`）+ `agent.ts` 的写入路径跟着改，并让 `transformContext`
-输入从线性数组改成反向遍历的产物。这是更大的工程，独立 PR 比较安全。
+**当前状态**：树的数据层已经落地 —— `nodes: Map<id, MessageNode>` + `★ currentNodeId`，
+`transformContext` 的输入也换成了 `activeBranch(state)` 反向遍历的产物，不再是裸数组。
+
+**还缺的是上层的树状能力**——分支探索、回退重放、上下文切片、跨分支对比。数据层
+（`addNodeAt` / `switchTo`）已就绪，但 UI 与输入侧没暴露分支切换，steering 仍被合并成
+一条 user 消息。要做这些能力，从 `src/context/state.ts` 的 `switchTo` 往上接 UI 即可，
+不用再动数据层。
 
 ## 常用命令
 
@@ -404,6 +411,34 @@ test("用一句话说明验证什么", async () => {
 - 传 `""`：**完全跳过**追加，模型会从 prefill 静默接续（适用场景：prefill 自身已经在引导对话）
 
 `--assistant-prompt` 不允许单独使用——必须配合 `--user-prompt`，因为 prefill 必须跟在 user 之后。`DEFAULT_PREFILL_COMMIT` 常量在 `src/index.ts` 里导出，单测可直接断言。
+
+## 终端 Markdown 渲染
+
+模型输出是 Markdown 源码，`src/ui/markdown.ts` 负责把它转成终端样式。三条硬约束决定了实现形态：
+
+**1. 只能在没有管道时开。** ANSI 转义序列一旦进了管道就是噪声（`| pbcopy` 会复制到一串 `\x1b[1m`）。
+所以 `src/index.ts` 里是 `args.markdown && process.stdout.isTTY === true`——`--no-markdown` 和
+非 TTY 输出都会落到 `enabled: false`，此时 `renderMarkdown()` / `push()` 都是**纯透传**，一个字节不多写。
+
+**2. 流式必须按行攒。** 交互模式是 token 级增量，`**bo` 和 `ld**` 可能分在两个 delta 里到达。
+逐 delta 渲染会把半个标记当成普通字符。所以 `createMarkdownStream()` 内部留一个行缓冲，
+只有吃到 `\n` 才吐出整行的渲染结果；`end()` 负责冲出最后没有换行的半行。
+`TerminalRenderer` 在每个**非** `stream` 事件前调 `flushText()`，否则工具调用行会插进一行文字中间。
+
+**3. 不引第三方依赖。** 只做终端够用的子集：
+
+| 语法 | 处理 |
+| --- | --- |
+| `#`~`######` 标题 | 去井号，h1/h2 加粗 + 洋红，其余只加粗 |
+| `-` `*` `+` `1.` 列表、`>` 引用 | 保留标记字符，标记本身转暗色；引用前缀换成 `│` |
+| `---` 分隔线 | 按终端列宽铺 `─` |
+| 围栏 ``` / ~~~ | 整块暗色原样输出，**内部不做任何行内解析** |
+| `**粗体**` `~~删除~~` `*斜体*` | 对应 ANSI；斜体只认 `*x*`，`_x_` 会把 `snake_case` 误判成强调 |
+| `` `行内码` `` | 青色，先切出来再处理强调，避免内部被二次解析 |
+| `[文字](链接)` | 文字青色 + 暗色地址 |
+
+跨行状态只有 `fence` 一个（关栏需同字符且长度 ≥ 开栏）。不支持嵌套强调、`***x***`、表格、HTML——
+这些要么罕见，要么在终端里没意义。
 
 ## 注意事项 / 已知的坑
 

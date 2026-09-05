@@ -9,10 +9,17 @@ import os from "node:os";
 import path from "node:path";
 
 import { Agent, type AgentEvent } from "../src/agent/agent.js";
-import { transformContext } from "../src/agent/context.js";
+import {
+  activeBranch,
+  addNodeAt,
+  appendNode,
+  createInitialState,
+  currentNode,
+  pathToRoot,
+  switchTo,
+  transformContext,
+} from "../src/context/index.js";
 import { convertToLlm } from "../src/agent/convert.js";
-import { createInitialState } from "../src/agent/state.js";
-import { activeBranch, addNodeAt, appendNode, currentNode, pathToRoot, switchTo } from "../src/agent/state.js";
 import { createMockStream } from "../src/providers/mock.js";
 import type { StreamFn, StreamOptions } from "../src/providers/types.js";
 import { allTools, bashTool, editTool, globTool, grepTool, readTool, writeTool, type ToolName } from "../src/tools/index.js";
@@ -22,6 +29,7 @@ import { globToRegExp, matchesGlob } from "../src/tools/glob-matcher.js";
 import { validateParams } from "../src/tools/validate.js";
 import { buildSeedMessages, DEFAULT_PREFILL_COMMIT } from "../src/index.js";
 import { createPrintOutput } from "../src/ui/print.js";
+import { createMarkdownStream, renderMarkdown } from "../src/ui/markdown.js";
 import type {
   AgentMessage,
   AssistantMessage,
@@ -926,6 +934,80 @@ test("registry：拼写错误的工具名会在 runAgent 路径上走 '未知工
   assert.ok(toolResult && toolResult.role === "toolResult");
   assert.equal(toolResult.isError, true);
   assert.match(toolResult.content[0]?.text ?? "", /未知工具/);
+});
+
+// ------------------------------------------------------------- markdown
+
+test("markdown: 行内标记渲染成 ANSI，标记字符不留在输出里", () => {
+  const out = renderMarkdown("这是 **粗体**、*斜体*、~~删除~~ 和 `code`。");
+  assert.ok(!out.includes("**"), `不应残留 **：${out}`);
+  assert.ok(!out.includes("~~"), `不应残留 ~~：${out}`);
+  assert.ok(!out.includes("`"), `不应残留反引号：${out}`);
+  assert.ok(out.includes("粗体") && out.includes("斜体") && out.includes("code"));
+  assert.ok(out.includes("\x1b[1m"), "粗体应有 BOLD");
+  assert.ok(out.includes("\x1b[36m"), "行内码应有 CYAN");
+});
+
+test("markdown: snake_case 不会被误判成斜体", () => {
+  const out = renderMarkdown("变量名 foo_bar_baz 保持原样");
+  assert.ok(!out.includes("\x1b[3m"), "下划线不该触发斜体");
+});
+
+test("markdown: 链接渲染成「文字 + 地址」，标题去掉井号", () => {
+  const link = renderMarkdown("见 [文档](https://example.com) ");
+  assert.ok(link.includes("文档"));
+  assert.ok(link.includes("https://example.com"));
+  assert.ok(!link.includes("]("), "链接语法应被消化掉");
+
+  const heading = renderMarkdown("## 二级标题\n", { width: 10 });
+  assert.ok(!heading.includes("## "), "井号应被去掉");
+  assert.ok(heading.includes("二级标题"));
+});
+
+test("markdown: 列表、引用、分隔线按块级处理", () => {
+  const list = renderMarkdown("- 第一项\n1. 第二项\n");
+  assert.ok(list.includes("第一项") && list.includes("第二项"));
+
+  const quote = renderMarkdown("> 引用一句\n");
+  assert.ok(quote.includes("│"), "引用应换成竖线前缀");
+  assert.ok(quote.includes("引用一句"));
+
+  const hr = renderMarkdown("---\n", { width: 5 });
+  assert.ok(hr.includes("─".repeat(5)), "分隔线应按给定宽度铺满");
+});
+
+test("markdown: 围栏代码块里的内容原样输出，且状态跨行保留", () => {
+  const out = renderMarkdown("```ts\nconst a = **not bold**;\n```\n");
+  assert.ok(out.includes("**not bold**"), "代码块内不应解析行内标记");
+
+  // 围栏必须成对：只有开栏时，后面所有行都还在代码里
+  const dangling = renderMarkdown("```\n- 仍是代码\n");
+  assert.ok(dangling.includes("仍是代码"));
+  assert.equal(dangling.split("\x1b[2m").length - 1, 2, "围栏行与代码行都应是 DIM 包裹");
+});
+
+test("markdown: 流式渲染——跨 delta 的标记不会被切坏", () => {
+  const stream = createMarkdownStream({ width: 40 });
+  assert.equal(stream.push("这是 **bo"), "", "半行不输出");
+  const out = stream.push("ld** 结束\n");
+  assert.ok(!out.includes("**"), `跨 delta 的粗体应被正确渲染：${out}`);
+  assert.ok(out.endsWith("\n"));
+});
+
+test("markdown: end() 冲出最后没有换行的半行", () => {
+  const stream = createMarkdownStream({ width: 40 });
+  stream.push("**收尾**");
+  assert.equal(stream.end(), "\x1b[1m收尾\x1b[0m");
+  assert.equal(stream.end(), "", "重复 end 应为空");
+});
+
+test("markdown: enabled 为 false 时纯透传，不打任何转义序列", () => {
+  const raw = "# 标题\n- **粗体**\n";
+  assert.equal(renderMarkdown(raw, { enabled: false }), raw);
+
+  const stream = createMarkdownStream({ enabled: false });
+  assert.equal(stream.push("**a**"), "**a**");
+  assert.equal(stream.end(), "");
 });
 
 // ----------------------------------------------------------------- print

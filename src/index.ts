@@ -6,8 +6,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { Agent, type AgentEvent } from "./agent/agent.js";
-import { MessageQueue } from "./agent/queue.js";
-import { createInitialState, totalUsage } from "./agent/state.js";
+import { MessageQueue, createInitialState, totalUsage } from "./context/index.js";
 import {
   defaultModel,
   parseModelSpec,
@@ -17,6 +16,7 @@ import type { StreamFn } from "./providers/types.js";
 import { allTools } from "./tools/index.js";
 import { InputController } from "./ui/input.js";
 import { createPrintOutput, readStdin } from "./ui/print.js";
+import { renderMarkdown } from "./ui/markdown.js";
 import { TerminalRenderer } from "./ui/renderer.js";
 import type { ModelRef } from "./types.js";
 
@@ -49,6 +49,10 @@ const HELP = [
   "                            注入后会追加一条用户消息触发「接续」轮次。",
   "  --prefill-commit,       -pc   自定义上面那条「接续」消息的内容；",
   "                            传空串 \"\" 则完全跳过，不追加任何默认消息。",
+  "",
+  "输出渲染：",
+  "  --no-markdown                原样输出 Markdown 源码，不做终端渲染",
+  "                            （管道/重定向时自动关闭，避免转义序列污染下游）",
 ].join("\n");
 
 interface CliArgs {
@@ -74,6 +78,8 @@ interface CliArgs {
    * - 其他：完整替换默认消息
    */
   prefillCommit: string | null;
+  /** 是否把模型输出的 Markdown 渲染成终端样式；`--no-markdown` 关掉 */
+  markdown: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -89,6 +95,7 @@ function parseArgs(argv: string[]): CliArgs {
     userPrompt: null,
     assistantPrompt: null,
     prefillCommit: null,
+    markdown: true,
   };
   const positional: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -103,6 +110,7 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === "--user-prompt" || a === "-up") args.userPrompt = argv[++i] ?? "";
     else if (a === "--assistant-prompt" || a === "-ap") args.assistantPrompt = argv[++i] ?? "";
     else if (a === "--prefill-commit" || a === "-pc") args.prefillCommit = argv[++i] ?? "";
+    else if (a === "--no-markdown") args.markdown = false;
     else if (a !== undefined) positional.push(a);
   }
   args.prompt = positional.join(" ").trim();
@@ -216,6 +224,9 @@ async function main(): Promise<number> {
   const stdinIsTty = process.stdin.isTTY === true;
   const printMode = args.print || !stdinIsTty || process.stdout.isTTY !== true;
 
+  // 管道 / 重定向时不能打转义序列，否则下游拿到的是一串 \x1b[1m 之类的噪声
+  const markdown = args.markdown && process.stdout.isTTY === true;
+
   const model: ModelRef = args.model !== undefined ? parseModelSpec(args.model) : defaultModel();
   let resolved = resolveModel(model);
 
@@ -263,7 +274,9 @@ async function main(): Promise<number> {
     await agent.run();
 
     const answer = sink.answer.trim();
-    if (answer.length > 0) process.stdout.write(`${answer}\n`);
+    if (answer.length > 0) {
+      process.stdout.write(`${renderMarkdown(answer, { enabled: markdown })}\n`);
+    }
     for (const warning of sink.warnings) process.stderr.write(`${warning}\n`);
     for (const error of sink.errors) process.stderr.write(`错误：${error}\n`);
 
@@ -275,7 +288,7 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  const sink = new TerminalRenderer({ verbose });
+  const sink = new TerminalRenderer({ verbose, markdown });
   renderer = sink;
   onEvent = (event: AgentEvent): void => sink.handle(event);
 

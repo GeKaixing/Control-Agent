@@ -16,11 +16,15 @@ import type {
   UserMessage,
 } from "../types.js";
 import { assistantToolCalls, emptyUsage } from "../types.js";
-import { transformContext, type TransformOptions } from "./context.js";
+import {
+  appendNode,
+  currentNode,
+  MessageQueue,
+  transformContext,
+  type AgentState,
+  type TransformOptions,
+} from "../context/index.js";
 import { convertToLlm } from "./convert.js";
-import { MessageQueue } from "./queue.js";
-import { appendNode, currentNode } from "./state.js";
-import type { AgentState } from "./state.js";
 
 export type AgentEvent =
   | { type: "agent_start" }

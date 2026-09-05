@@ -37,18 +37,19 @@ npm start -- --model anthropic:claude-3-7-sonnet-latest
 
 ## 命令行
 
-| 参数                          | 说明                                 |
-| --------------------------- | ---------------------------------- |
-| `-m, --model <provider:id>` | 指定模型，如 `openai:gpt-4o-mini`、`mock` |
-| `-c, --cwd <dir>`           | 工作目录，默认当前目录                        |
-| `-p, --print`               | 非交互模式，只输出最终答案                      |
-| `-v, --verbose`             | 显示模型的思考过程                          |
-| `-h, --help`                | 显示帮助                               |
-| `--system-prompt, -sp <text>`     | 完全替换默认系统提示词                       |
-| `--append-system-prompt, -asp <text>` | 在默认系统提示词末尾追加一段指令               |
-| `--user-prompt, -up <text>`       | 显式传入用户提示词（与位置参数互斥）               |
-| `--assistant-prompt, -ap <text>`     | 注入一段助手 prefill；必须与 `--user-prompt` 同用 |
-| `--prefill-commit, -pc <text>`      | 自定义 prefill 后追加的那条接续消息；传 `""` 表示跳过 |
+| 参数                                  | 说明 |
+| ----------------------------------- | ---- |
+| `-m, --model <provider:id>`           | 指定模型，如 `openai:gpt-4o-mini`、`mock` |
+| `-c, --cwd <dir>`                     | 工作目录，默认当前目录 |
+| `-p, --print`                         | 非交互模式，只输出最终答案 |
+| `-v, --verbose`                       | 显示模型的思考过程 |
+| `-h, --help`                          | 显示帮助 |
+| `--system-prompt, -sp <text>`         | 完全替换默认系统提示词 |
+| `--append-system-prompt, -asp <text>` | 在默认系统提示词末尾追加一段指令 |
+| `--user-prompt, -up <text>`           | 显式传入用户提示词（与位置参数互斥） |
+| `--assistant-prompt, -ap <text>`      | 注入一段助手 prefill；必须与 `--user-prompt` 同用 |
+| `--prefill-commit, -pc <text>`        | 自定义 prefill 后追加的那条接续消息；传 `""` 表示跳过 |
+| `--no-markdown`                       | 原样输出 Markdown 源码；管道 / 重定向时自动关闭渲染 |
 
 交互模式下的斜杠命令：`/help` `/model <spec>` `/tools` `/usage` `/clear` `/verbose` `/exit`。  
 运行中按 Ctrl-C 中断当前任务，Ctrl-D 退出。
@@ -101,6 +102,24 @@ npm start -- --model mock --user-prompt "u" --assistant-prompt "好的，" --pre
 
 `-ap` 注入 prefill 后会自动追加一条用户消息触发接续轮次。文本默认是 `[c-agent prefill] 请基于上一条助手消息继续。`，可用 `--prefill-commit` 自定义；传空串 `""` 表示**完全跳过追加**，模型会从 prefill 静默接续。prefill 必须跟在 user 之后，所以 `--assistant-prompt` 不允许单独使用。
 
+## 输出渲染
+
+模型吐出来的是 Markdown 源码，终端里会把它渲染成带样式的文本：`# 标题` 去掉井号并加粗、
+`**粗体**` / `*斜体*` / `` `行内码` `` 转成对应样式、列表与引用换上暗色标记、围栏代码块整块暗色并
+原样保留内容（里面的 `**` 不会被当成强调）。
+
+```bash
+# 默认就开着，交互模式和 print 模式（stdout 是终端时）都生效
+npm start -- -p "用 Markdown 表格对比一下" --model mock
+
+# 想要原始 Markdown（比如要粘到别处）
+npm start -- --no-markdown -p "…" --model mock
+```
+
+管道 / 重定向时**自动关闭**渲染，不写任何 ANSI 转义序列——`| pbcopy`、`> out.md` 拿到的仍是干净
+的 Markdown 源码。渲染器自己实现（`src/ui/markdown.ts`），不引第三方依赖；流式输出按行攒齐再吐，
+所以跨 chunk 断开的 `**bo|ld**` 也不会渲染错。
+
 ## 架构
 
 ```
@@ -129,9 +148,10 @@ src/
   types.ts           与厂商无关的内部消息格式
   agent/
     agent.ts         双层循环 + 事件发射
-    state.ts         代理状态与 token 估算
-    context.ts       transformContext：清理 / 压缩 / 按预算裁剪
     convert.ts       内部消息 → 模型消息
+  context/           模型真正看到的那份上下文（统一出口 index.ts）
+    state.ts         会话状态 + 会话树（节点 / ★ / 分支）与 token 估算
+    transform.ts     transformContext：清理 / 压缩 / 按预算裁剪
     queue.ts         后续指令队列 + 中途插入队列
   providers/
     types.ts         StreamFn、StreamEvent、LlmTool
@@ -168,7 +188,7 @@ tests/run.ts         零依赖测试运行器
 ## 测试
 
 ```bash
-npm test           # 38 个用例
+npm test           # 46 个用例
 npm run typecheck  # tsc --noEmit
 ```
 
