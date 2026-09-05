@@ -80,6 +80,209 @@ g/
 - **tools/** — 6 个内置工具的注册与共享辅助
 - **ui/** — 渲染器只读 `AgentEvent`，不知道「模型」或「工具」是谁
 - **tests/run.ts** — 端到端 + 单元 + 边界，靠 `node:assert/strict`，无第三方依赖
+## 会话运行时
+
+这一节讲清三件事：c-agent 跑一次请求时**事件流**怎么走、**中途插话**如何合并进上下文、
+**transformContext** 怎么做后处理。然后讲**会话的概念视图是一棵树**，并诚实标出当前实现
+与这种树状语义的差距。
+
+### 事件清单
+
+`AgentEvent` 是 11 种事件的判别联合（`src/agent/agent.ts:24-39`），订阅者按 `type` 分发：
+
+| type | 何时发出 | 关键字段 | 订阅者常做的事 |
+| --- | --- | --- | --- |
+| `agent_start` | 外层循环入口 | — | 打印横幅、记录起始时间 |
+| `turn_start` | 内层每个 user 轮开始 | `pendingFollowUps: number` | 提示「正在思考」；>0 表明本轮开头合并了上轮 steering |
+| `steering` | 模型流期间被中途插入文本 | `texts: string[]` | 累积下来；只用于日志/UI，无业务动作 |
+| `stream` | 模型流式增量 | `event: StreamEvent` | 转发厂商事件（`start` / `text_delta` / `thinking_delta` / `toolcall_delta` / `toolcall_end` / `done` / `error`） |
+| `tool_start` | 工具执行前 | `toolCall`, `parallel: boolean` | 渲染 `→ bash(command=…)` 之类；`parallel` 区分两类并发模式 |
+| `tool_end` | 工具完成后 | `toolCall`, `result`, `durationMs` | 渲染 `✓ bash 36ms`；失败时切换错误样式 |
+| `turn_end` | 内层一轮结束 | `message: AssistantMessage` | 落账到 `state.messages`，可记 token 用量 |
+| `context_pruned` | `transformContext` 三步任一步生效时 | `droppedMessages`, `prunedToolResults` | 渲染「已清理 N 条/压缩 M 条」 |
+| `notice` | 非致命但需告知 | `message` | 显示降级提示、超出工具调用上限、模型流错误等 |
+| `agent_end` | 整轮退出 | `toolRounds` | 打印 token 累计、释放资源、退出 REPL |
+
+### 典型一次回合
+
+一次无中途插话、有工具往返 + 一次并行的回合，事件流：
+
+```mermaid
+sequenceDiagram
+  participant U as Agent
+  participant M as Model
+  participant T as Tool
+  U-->>U: agent_start
+  U->>M: turn_start {pendingFollowUps: 0}
+  U->>M: stream(start)
+  U->>M: stream(text_delta, …)
+  U->>M: stream(toolcall_end {id:a, name:'read'})
+  U->>T: tool_start {toolCall:a, parallel:false}
+  T-->>U: tool_end {result, durationMs}
+  U->>M: turn_end {message: assistant+a}
+  U->>M: turn_start {pendingFollowUps: 0}
+  par 并行只读工具
+    U->>M: stream(toolcall_end {id:b, name:'grep'})
+    U->>M: stream(toolcall_end {id:c, name:'glob'})
+  end
+  par 并行执行
+    U->>T: tool_start {toolCall:b, parallel:true}
+    U->>T: tool_start {toolCall:c, parallel:true}
+    T-->>U: tool_end {result:b, …}
+    T-->>U: tool_end {result:c, …}
+  end
+  U->>M: turn_end {message: assistant+b+c}
+  U->>M: turn_start {pendingFollowUps: 0}
+  U->>M: stream(text_delta, "完成")
+  U->>M: stream(toolcall_end {})  // 没有 toolCall
+  U->>M: turn_end {message: assistant}  // 终态：模型给出文本答案
+  U-->>U: agent_end {toolRounds: 3}
+```
+
+### 中途插话（steering）
+
+用户在交互模式里、模型正跑的时候按键回车 —— 文本进 `MessageQueue.pendingSteeringTexts`。
+模型本轮结束 → 内层循环退出 → 下一轮 `turn_start` 处合并 steering：
+
+```mermaid
+sequenceDiagram
+  participant U as Agent
+  participant M as Model
+  participant UI as InputController
+  U->>M: turn_start {pendingFollowUps: 0}
+  UI->>U: enqueueSteering("换个思路")
+  U->>M: stream(text_delta, …)
+  Note right of U: streaming 期间仅累积，不打扰
+  U->>M: turn_end {message: assistant}
+  U->>U: pendingSteeringTexts 取出、合并进新 user message
+  U->>M: turn_start {pendingFollowUps: 1}  // 表明本轮头部已合并上轮 steering
+```
+
+`pendingFollowUps` 是关键：如果它 `>0`，本轮结束时不算「终态」，内层循环会再跑一轮直到归 0。
+
+### `transformContext` 三步后处理
+
+每轮 `turn_end` 之后、内层循环继续前调 `transformContext(state.messages, transformOptions)`。
+三步顺序敏感（`src/agent/context.ts`）：
+
+1. **清理孤儿**：删除没有对应 `toolCall.id` 的 `toolResult`（异常流中断会留下）
+2. **压缩旧轮次**：保留深度之外的旧轮被摘要替换（默认保留深度很小，几乎全丢，只留骨架）
+3. **按预算整轮丢弃**：tokens 仍超限时，按整轮从最早的开始丢，直到 ≤ 预算
+
+每一步都会发 `context_pruned` 事件，UI 实时可见清理进度。
+
+### 工具并发与失败止损
+
+**并发规则**（`agent.ts:executeToolCalls`）：
+
+- `allowParallelTools && 全部 isMutating === false` → `Promise.all(...)` 并发
+- 任一 mutating → 串行顺序 await
+- `bash` / `write` / `edit` 标 `true`（会改状态），`read` / `glob` / `grep` 标 `false`（纯只读）
+
+**失败止损**：
+
+- 工具 `execute()` 不 `throw`；用 `ok()` / `fail()` 返回（异常由 `agent.ts` 兜底转 `fail`）
+- 同一工具连续 3 次失败 → `failureCounts` 满 → 发 `notice: '工具 X 连续 3 次失败，已中止内层循环'` → 内层 break
+- 外层 `maxToolRounds` 默认 50：超出发 `notice` 并退出；异常流用 `notice + 降级提示`，绝不崩溃
+
+### 概念视图：会话是一棵树
+
+事件流是**实现侧**的描述（消息如何进 `state.messages`）。从**用户视角**看，
+会话其实可以更自然地视作一棵树：
+
+```
+Root                          ← 会话起点（隐含，不一定是 user #1）
+│
+▼ parent
+User #1
+│
+▼
+Assistant #1
+│
+▼
+User #3
+│
+▼
+Assistant #3
+│
+┌──────┴──────┐
+▼              ▼
+Branch A       Branch B       ← 用户中途分叉「试另一种思路」
+│              │
+▼              ▼
+User #4-A      User #4-B
+│              │
+▼              ▼
+Assistant #4-A Assistant #4-B
+│
+▼
+Tool Call #2
+│
+▼
+★ Current Node               ← ★ 是模型的「接续焦点」
+```
+
+- 每个节点 = 一条 `Message`，**携带 `parent` 指针**指向上一个节点
+- `★ Current Node` 是「LLM 下次接手写的位置」
+- `★` 推进规则：
+
+  | 事件 | `★` 推进到 |
+  | --- | --- |
+  | 工具结果回填 | 该 `toolResult` 节点 |
+  | 用户在交互模式中途插话 | 新追加的 `user` 节点 |
+  | 模型生成新的 `assistant`  | 该 `assistant` 节点 |
+  | 用户在分支间切换 | 目标分支末端 |
+  | 模型要在当前位置接续 | 在 `★` 下新增子节点（成为新的 `★`） |
+
+**反向遍历得到线性序列**：LLM 准备生成下一条消息前，从 `★` 沿 `parent` 走到 `Root`，拿到
+一条**线性历史**，这就是模型真正看到的上下文。整棵树对模型不可见，它只看这条路径。
+
+```
+★ Current Node
+│ ← parent
+Tool Result #2
+│
+▼
+Tool Call #2
+│
+▼
+Assistant #4-A
+│
+▼
+User #4-A
+│
+▼
+Branch A
+│
+▼
+Assistant #3   ← 一直走到 Root 才停
+```
+
+拿到的线性序列等价于：
+
+```
+User #1 → Assistant #1 → User #3 → Assistant #3
+       → User #4-A → Assistant #4-A → Tool Call #2 → Tool Result #2
+       → (LLM 从此处接续，预期产出 Assistant #5-A)
+```
+
+拿到序列后，才能进上一节的 `transformContext` 三步后处理。
+
+### 当前实现 vs 树状语义
+
+| 设计语义 | c-agent 当前实现 |
+| --- | --- |
+| 每条消息带 `parent` 指针 | 扁平 `messages[]`，无 `parent` |
+| `★ Current Node` 概念 | 不存在；所有消息默认全部进上下文 |
+| 分支（Branch A / B）并存 | steering 仅合并成新的 `user` 消息，不创建分支 |
+| LLM 看到的 = `★ → Root` 线性序列 | 直接按数组顺序拼 |
+| 反向遍历 | 不存在，按数组遍历 |
+
+**诚实结论**：当前 c-agent 用 `messages[]` 数组**近似**这个树，能跑通所有内置功能，
+但**不支持**树状语义才有的能力——分支探索、回退重放、上下文切片、跨分支对比。
+要做到真的「会话是一棵树」，重构点是 `state.ts`（`messages: Message[]` → `nodes:
+Map<id, MessageNode>` + `parent: id`）+ `agent.ts` 的写入路径跟着改，并让 `transformContext`
+输入从线性数组改成反向遍历的产物。这是更大的工程，独立 PR 比较安全。
 
 ## 常用命令
 
