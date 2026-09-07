@@ -5,15 +5,21 @@
  */
 
 import type { LlmContent, LlmMessage } from "../providers/types.js";
-import type { AgentMessage } from "../types.js";
+import type { AgentMessage, ImageContent } from "../types.js";
 
 export function convertToLlm(messages: AgentMessage[]): LlmMessage[] {
   const out: LlmMessage[] = [];
 
   for (const m of messages) {
     if (m.role === "user") {
-      if (m.content.trim().length === 0) continue;
-      out.push({ role: "user", content: [{ type: "text", text: m.content }] });
+      const images: ImageContent[] = m.images ?? [];
+      // 有图无文本也要能通过（正文用占位说明）；两者皆空才跳过
+      if (m.content.trim().length === 0 && images.length === 0) continue;
+      const content: LlmContent[] = [
+        { type: "text", text: m.content.trim().length > 0 ? m.content : "（请看图片）" },
+        ...images.map((img) => ({ type: "image" as const, dataUrl: img.dataUrl })),
+      ];
+      out.push({ role: "user", content });
       continue;
     }
 
@@ -58,7 +64,7 @@ export function convertToLlm(messages: AgentMessage[]): LlmMessage[] {
   }
 
   // 部分 API（如 Anthropic）要求首条消息必须是 user
-  while (out.length > 0 && (out[0] as LlmMessage).role !== "user") out.shift();
+  while (out.length > 0 && out[0].role !== "user") out.shift();
 
   return out;
 }

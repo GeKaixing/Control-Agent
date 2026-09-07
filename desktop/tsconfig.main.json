@@ -1,8 +1,33 @@
 {
-  "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "noEmit": true,
-    "types": ["node"]
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM"],
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "noEmit": false,
+    "outDir": "main/dist",
+    "rootDir": "../..",
+    "types": ["node"],
+    "verbatimModuleSyntax": false,
+    "isolatedModules": false
   },
-  "include": ["main/**/*", "shared/**/*"]
+  "include": [
+    "main/**/*.ts",
+    "shared/**/*.ts",
+    "../src/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "renderer",
+    "preload",
+    "../src/connector/demo.ts"
+  ]
 }

@@ -1,0 +1,9 @@
+{
+  "id": "desktop-display",
+  "version": "0.1.0",
+  "type": "desktop",
+  "description": "桌面端消息显示 connector：消费 AgentEvent / SessionSignal 流，转换成 WireEvent 并经注入的 transport 推给显示端（默认 Electron IPC）。这是消息显示 UI 的「默认连接」。",
+  "permissions": [],
+  "capabilities": [],
+  "entry": "index.ts"
+}

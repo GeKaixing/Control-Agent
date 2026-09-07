@@ -3,7 +3,7 @@
  * 只做「翻译」：统一消息 → OpenAI 请求，SSE 增量 → 统一流式事件。
  */
 
-import type { ModelRef, StopReason } from "../types.js";
+import type { ModelRef, StopReason, ThinkingLevel } from "../types.js";
 import { StreamAccumulator, StreamError, parseSse } from "./stream.js";
 import type { JsonSchema, LlmMessage, LlmTool, StreamFn } from "./types.js";
 
@@ -19,12 +19,25 @@ function toOpenAiMessages(systemPrompt: string, messages: LlmMessage[]): unknown
 
   for (const m of messages) {
     if (m.role === "user") {
+      const text = m.content
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("\n");
+      const images = m.content.filter((c) => c.type === "image");
+      if (images.length === 0) {
+        out.push({ role: "user", content: text });
+        continue;
+      }
+      // 多模态：text + image_url（data URL 直接可用，无需拆 base64）
       out.push({
         role: "user",
-        content: m.content
-          .filter((c) => c.type === "text")
-          .map((c) => (c as { text: string }).text)
-          .join("\n"),
+        content: [
+          ...(text.length > 0 ? [{ type: "text", text }] : []),
+          ...images.map((c) => ({
+            type: "image_url",
+            image_url: { url: (c as { dataUrl: string }).dataUrl },
+          })),
+        ],
       });
       continue;
     }
@@ -79,8 +92,27 @@ function mapFinishReason(reason: unknown, hasToolCalls: boolean): StopReason {
   return "stop";
 }
 
+/**
+ * ThinkingLevel → OpenAI reasoning_effort。
+ * off → undefined（不发字段，走端点默认）；minimal/low → low；medium/high 原样。
+ * （o 系列不认 minimal；用 low 保持保守）
+ */
+export function reasoningEffort(level: ThinkingLevel): "low" | "medium" | "high" | undefined {
+  switch (level) {
+    case "off":
+      return undefined;
+    case "minimal":
+    case "low":
+      return "low";
+    case "medium":
+      return "medium";
+    case "high":
+      return "high";
+  }
+}
+
 export const openaiStream: StreamFn = async function* (options) {
-  const { model, systemPrompt, messages, tools, maxTokens, signal } = options;
+  const { model, systemPrompt, messages, tools, maxTokens, thinkingLevel, signal } = options;
   const acc = new StreamAccumulator(`${model.provider}:${model.id}`);
 
   const body: Record<string, unknown> = {
@@ -101,7 +133,16 @@ export const openaiStream: StreamFn = async function* (options) {
     body["tools"] = mapped;
     body["tool_choice"] = "auto";
   }
-  if (maxTokens !== undefined) body["max_tokens"] = maxTokens;
+
+  // 推理强度（Model 支柱）：off 不发（走端点默认），其余映射 reasoning_effort。
+  // 注意 o 系列与 gpt-5 系列的 token 上限参数是 max_completion_tokens，
+  // 其余 OpenAI 兼容端点（mimo / vLLM 等）仍只认 max_tokens。
+  const effort = reasoningEffort(thinkingLevel);
+  if (effort !== undefined) body["reasoning_effort"] = effort;
+  const newTokenParam = /^(o\d|gpt-5)/i.test(model.id);
+  if (maxTokens !== undefined) {
+    body[newTokenParam ? "max_completion_tokens" : "max_tokens"] = maxTokens;
+  }
 
   const baseUrl = model.baseUrl ?? DEFAULT_BASE_URL;
   let response: Response;
@@ -111,6 +152,10 @@ export const openaiStream: StreamFn = async function* (options) {
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${model.apiKey ?? ""}`,
+        // opencode zen go 中继要求：稳定会话 id（缺失 400 MissingSessionID）+
+        // 自定义 UA（文档禁止 generic SDK/HTTP 库默认名）。其他端点忽略这两头。
+        ...(options.sessionId !== undefined ? { "x-opencode-session": options.sessionId } : {}),
+        "user-agent": "c-agent/0.1",
       },
       body: JSON.stringify(body),
       ...(signal ? { signal } : {}),

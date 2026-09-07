@@ -1,0 +1,30 @@
+{
+  "id": "ffmpeg",
+  "version": "0.1.0",
+  "type": "cli",
+  "description": "视频/音频处理 CLI 适配（基于系统安装的 ffmpeg / ffprobe）",
+  "permissions": ["process.start"],
+  "entry": "index",
+  "capabilities": [
+    {
+      "name": "video.probe",
+      "description": "读取媒体元信息（时长、编码、码率、轨道数），返回 ffprobe JSON 摘要",
+      "mutating": false
+    },
+    {
+      "name": "video.cut",
+      "description": "按起止时间剪切片段（-c copy，不重编码，速度快但切点可能不精确到帧）",
+      "mutating": true
+    },
+    {
+      "name": "audio.extract",
+      "description": "从视频中提取音轨到独立文件（默认复制原始编码流）",
+      "mutating": true
+    },
+    {
+      "name": "video.convert",
+      "description": "转封装或转码到指定格式（format 由输出文件后缀推断）",
+      "mutating": true
+    }
+  ]
+}

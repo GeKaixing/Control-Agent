@@ -6,7 +6,8 @@
 
 | 文件 | 行数级 | 职责 |
 | --- | --- | --- |
-| `input.ts` | ~70 | `InputController`：基于 `node:readline` 的 REPL，收集「模型跑着的时候键入的内容」→ 进 `steering` 通道 |
+| `input.ts` | ~120 | `LoopInput` 接口 + `InputController`（readline）+ `FakeInput`（测试） |
+| `repl.ts` | ~190 | `runRepl()`：把 `src/index.ts` 的 REPL 主循环抽出来，可被 `FakeInput` 注入 |
 | `renderer.ts` | ~185 | `TerminalRenderer`：把 `AgentEvent` 转成带 ANSI 颜色的终端输出；按 `verbose` 决定是否显示 thinking；token 用量汇总 |
 | `markdown.ts` | ~155 | `createMarkdownStream()` / `renderMarkdown()`：精简 Markdown → ANSI（标题、列表、引用、分隔线、围栏代码块 + 行内粗体/斜体/行内码/链接） |
 | `print.ts` | ~90 | `createPrintOutput()`：`npm start -- -p` / 管道场景下，把同一批事件收敛成「最终答案」+ 警告 + 错误 + exitCode |
@@ -70,18 +71,45 @@ case "tool_start":     // （无输出）
 ## `InputController` —— REPL 与中途指令
 
 ```ts
-class InputController {
-  constructor(): 打开 readline，historySize = 500
-  ask(prompt): Promise<string>   // 等提示符后一行（外层用）
-  drainSteering(): string[]      // 把模型跑着期间积攒的输入一次性取走
-  onSigint(handler): void        // Ctrl-C 转发给 agent.abort()
-  close(): void
+interface LoopInput {
+  ask(prompt): Promise<string>;       // 外层等一行
+  drainSteering(): string[];          // 模型跑着期间积攒的输入一次性取走
+  onSigint(handler): void;            // Ctrl-C 转发给 agent.abort()
+  close(): void;
 }
+
+class InputController implements LoopInput { /* 真终端 readline */ }
+class FakeInput implements LoopInput { /* tests/repl-loop.ts 驱动 */ }
 ```
 
 `readline.on("line", ...)` 里：如果有等待中的 `ask()` waiter（外层正在等），就交给
 waiter；否则进 `steering` 队列。`on("close")` 会把最后没读完的 `/exit` 喂给 waiter，
 处理 stdin 关闭的场景。
+
+抽出 `LoopInput` 接口是因为子进程 stdio 永远不是 TTY——`process.stdin.isTTY === false`
+会让 `index.ts` 走 print 模式，测不了 REPL。`runRepl()` 吃 `LoopInput`，测试灌 `FakeInput`，
+真实启动还是 `InputController`。
+
+## `runRepl()` —— REPL 主循环
+
+`src/index.ts` 原本 inline 了 REPL 主循环，抽到 `repl.ts` 是为了在测试里 in-process 跑。
+函数签名：
+
+```ts
+runRepl(opts: {
+  agent, state, queue, allTools, helpText,
+  input: LoopInput,
+  output: (text: string) => void,      // 测试可替换，真实启动 = process.stdout.write
+  initialVerbose: boolean,
+  onToggleVerbose: (next: boolean) => void,   // 闭包对象把可变状态传出
+  resolveNewModel: (spec: string) => Promise<{…}>,
+  getUsage: () => UsageSnapshot,
+  steeringPollMs?: number,
+}): Promise<number>   // 退出码，0 / 130 (Ctrl-C)
+```
+
+斜杠命令：`/exit` / `/help` / `/tools` / `/usage` / `/clear` / `/verbose` / `/model <spec>`。
+主要两件事：把内层循环处理 steering 合并进 user 输入；按 model 重置 agent。
 
 ## Markdown 渲染的「终端够用」子集
 

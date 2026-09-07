@@ -1,4 +1,4 @@
-# tools/ —— 6 个内置工具
+# tools/ —— 7 个内置工具
 
 **关注点**：把模型能调用的「动作」都收口在这里。模型看到的是 `LlmTool[]`（带 JSON Schema
 签名），执行时拿到的是 `Tool.execute(args, ctx)` 的统一签名。每个工具都标 `isMutating`
@@ -8,7 +8,7 @@
 
 | 文件 | 行数级 | 职责 |
 | --- | --- | --- |
-| `index.ts` | ~60 | `TOOL_REGISTRY`（单一真相源）；`ToolName` 联合派生；`findTool()` / `toolNames()` / `allTools` / `describeToolsForModel()` |
+| `index.ts` | ~60 | `TOOL_REGISTRY`（单一真相源）；`ToolName` 联合派生；`allTools` / `describeToolsForModel()` |
 | `types.ts` | ~30 | `Tool` 接口、`ToolContext { cwd, signal }`、`ToolResult { content, isError }`、`ok()` / `fail()` 辅助 |
 | `validate.ts` | ~? | `validateParams(schema, args)`：用本目录精简版 `JsonSchema` 校验参数 |
 | `fs-utils.ts` | ~? | `resolvePath()`、`truncateText()`、walk 时跳过隐藏目录与 `IGNORED_DIRS` |
@@ -19,6 +19,7 @@
 | `bash.ts` | ~? | 执行 shell；超时默认 120s、上限 600s；输出按 `MAX_OUTPUT_CHARS` 截断；`isMutating: true` |
 | `glob.ts` | ~? | 走 `fs-utils.walk` 的 glob 匹配 |
 | `grep.ts` | ~? | 走 `parseSse` 类似的字节流解析，最终落到 ripgrep 后端 |
+| `memory.ts` | ~? | 跨会话记忆：append（带时间戳追加到项目根 `MEMORY.md`）/ read（读回，保留尾部 8K）；注入端在 `session.ts` 的 `collectProjectMemory` |
 
 ## `Tool` 接口
 

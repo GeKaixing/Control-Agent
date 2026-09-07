@@ -10,7 +10,8 @@
 - **统一的流式接口**：OpenAI / Anthropic / mock 三个适配器都收敛成同一个 `StreamFn`，上层只认 `StreamEvent`。
 - **六个内置工具**：`read` `write` `edit` `bash` `glob` `grep`，只读工具默认并行执行。
 - **上下文自动管理**：清理孤儿工具结果 → 压缩旧轮次 → 按 token 预算整轮丢弃，保证不拆散 `assistant + toolResult` 结构。
-- **中途插入指令**：代理运行期间敲进去的话不会丢，会注入下一轮工具往返。
+- **中途插入指令**：代理运行期间敲进去的话不会丢，会注入下一轮工具往返；串行工具的
+  间隙发现插话会立即停手，剩余调用标 skipped 回给模型（借鉴 pi agent 的打断语义）。
 - **可脚本化**：print 模式只输出最终答案，进度信息走 stderr，方便管道与重定向。
 
 ## 快速开始
@@ -157,9 +158,14 @@ src/
     types.ts         StreamFn、StreamEvent、LlmTool
     stream.ts        流式事件累积成完整消息
     openai.ts  anthropic.ts  mock.ts
-  tools/             read / write / edit / bash / glob / grep
-  ui/                renderer（交互）· print（非交互）· input
-tests/run.ts         零依赖测试运行器
+  tools/             read / write / edit / bash / glob / grep / memory（跨会话记忆）
+  ui/                renderer（交互）· print（非交互）· input（readline）· repl（REPL 主循环，可被测试注入 FakeInput）
+tests/
+  run.ts              零依赖运行器入口；编排 + 直接 import 内部模块的单元/集成测试
+  registry.ts         用例注册中心，子用例文件自注册
+  manual.ts           ManualSession：spawn 真子进程 / in-process FakeInput
+  cli-print.ts        spawn c-agent 跑 print 模式的端到端用例（21）
+  repl-loop.ts        FakeInput 驱动 src/ui/repl.ts 的循环用例（17）
 ```
 
 ## 工具
@@ -188,15 +194,42 @@ tests/run.ts         零依赖测试运行器
 ## 测试
 
 ```bash
-npm test           # 46 个用例
+npm test           # 86 个用例：48 单元/集成 + 21 CLI 子进程 + 17 in-process REPL
 npm run typecheck  # tsc --noEmit
 ```
 
-测试覆盖 glob 匹配、参数校验、各工具行为、上下文变换、格式转换，以及 mock 模型下的端到端链路和 print 模式的输出收敛。
+测试运行器是项目自带的零依赖版本（只 `node:assert/strict` + `tsx`），用例分三类：
+
+| 文件 | 关注 | 用例数 |
+| --- | --- | --- |
+| `tests/run.ts` | 直接 import 内部模块测单元 / 集成 / 边界，最快 | 48 |
+| `tests/cli-print.ts` | spawn 真 c-agent 跑 print 模式，端到端测 CLI 参数、退出码、stdout/stderr 分离 | 21 |
+| `tests/repl-loop.ts` | 把 `src/ui/repl.ts` 的循环用 `FakeInput` 驱动，in-process 模拟用户在终端里敲键盘 | 17 |
+
+CLI/REPL 两类用例都跑在 `tests/manual.ts` 提供的 `ManualSession` 上：
+
+- `ManualSession.spawn({...})` 起真子进程：`expect()` / `send()` / `expectIdle()` 模拟按键 + 等待输出。
+- `ManualSession.inProcess({...})` 不起子进程：`FakeInput.pushLine()` 模拟 readline，agent 的 text_delta 通过 `pumpOutput()` 灌进 session 里 await。
+
+`tests/registry.ts` 是用例注册中心——子文件 `import { test } from "./registry.js"` 自注册，`run.ts` 加一行 import 就接进。零依赖是硬约束，所以这两层抽象都用 `node:assert/strict` + `tsx`，不上 jest/vitest。
+
+### 加测试分类
+
+新写一份 `tests/foo.ts`：
+
+```ts
+import { test, assert } from "./registry.js";
+
+test("foo: …", async () => {
+  // …
+});
+```
+
+再到 `tests/run.ts` 顶部加 `import "./foo.js";` 就接进总编排，npm test 就会跑。
 
 ## 扩展
 
-**加工具**：在 `src/tools/` 下实现 `Tool` 接口（`name` / `description` / `parameters` / `execute`，会改文件的加 `isMutating: true`），然后注册进 `src/tools/index.ts` 的 `_registry` 对象。`ToolName` 联合和 `findTool()` 签名都会自动跟着更新。
+**加工具**：在 `src/tools/` 下实现 `Tool` 接口（`name` / `description` / `parameters` / `execute`，会改文件的加 `isMutating: true`），然后注册进 `src/tools/index.ts` 的 `_registry` 对象。`ToolName` 联合会自动跟着更新。
 
 **禁用某些工具**：`AgentOptions.disabledTools` 接受 `ToolName[]`，模型调用列表里的工具会收到「已被禁用」错误，不会真的执行。
 

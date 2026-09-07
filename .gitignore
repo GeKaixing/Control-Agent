@@ -3,6 +3,17 @@ dist/
 .env
 *.log
 .DS_Store
+desktop/renderer-dist/
+desktop/native/dictate.app/
 
 # 代理工作记忆（.workbuddy/memory/），属于本地笔记，不进版本库
 .workbuddy/
+# c-agent 运行时本地状态：会话历史（.c-agent/sessions/，--resume 用）
+.c-agent/
+# c-agent 跨会话记忆（memory 工具写入项目根，本地工作笔记不进版本库）
+/MEMORY.md
+# bot 平台依赖的独立安装目录（wechaty 树大，独立装避免污染主 lockfile；
+# 通过 symlink 从主 node_modules 引用，见 src/bot/doc/README.md）
+/bot-deps/
+# wechaty 登录 cookies（wx.qq.com 会话凭据，绝不能进版本库）
+c-agent-wechat.memory-card.json

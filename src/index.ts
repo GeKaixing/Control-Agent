@@ -5,14 +5,16 @@
 
 import path from "node:path";
 import { Agent, type AgentEvent } from "./agent/agent.js";
-import { totalUsage } from "./context/index.js";
+import { latestSessionId, loadSessionInto } from "./context/index.js";
+import { ConnectorLoader } from "./connector/loader/connector-loader.js";
+import { ConnectorRuntime } from "./connector/runtime/connector-runtime.js";
 import type { StreamFn } from "./providers/types.js";
 import { assembleSession, buildSeedMessages, resolveModelSpec } from "./session.js";
-import { allTools } from "./tools/index.js";
 import { InputController } from "./ui/input.js";
 import { createPrintOutput, readStdin } from "./ui/print.js";
 import { renderMarkdown } from "./ui/markdown.js";
 import { TerminalRenderer } from "./ui/renderer.js";
+import { runRepl, usageSnapshot } from "./ui/repl.js";
 
 const HELP = [
   "命令：",
@@ -21,6 +23,8 @@ const HELP = [
   "  /tools             列出可用工具",
   "  /usage             显示本次会话的 token 用量",
   "  /clear             清空对话历史",
+  "  /compact           把对话历史压缩成模型摘要（旧分支保留，可回溯）",
+  "  /sessions          列出已持久化的会话（.c-agent/sessions/）",
   "  /verbose           切换是否显示思考过程",
   "  /exit              退出（也可用 Ctrl-D）",
   "",
@@ -44,9 +48,17 @@ const HELP = [
   "  --prefill-commit,       -pc   自定义上面那条「接续」消息的内容；",
   "                            传空串 \"\" 则完全跳过，不追加任何默认消息。",
   "",
+  "会话持久化：",
+  "  --resume [id]                恢复已持久化的会话（含 compact 旧分支）；",
+  "                            省略 id 时恢复最近一次。交互模式每轮结束自动保存。",
+  "",
   "输出渲染：",
   "  --no-markdown                原样输出 Markdown 源码，不做终端渲染",
   "                            （管道/重定向时自动关闭，避免转义序列污染下游）",
+  "",
+  "Connector：",
+  "  --connectors <dir>           扫描目录，加载 connector 暴露的工具",
+  "                            （可多次，目录里需有 connector.json + 默认导出 class）",
 ].join("\n");
 
 interface CliArgs {
@@ -74,6 +86,13 @@ interface CliArgs {
   prefillCommit: string | null;
   /** 是否把模型输出的 Markdown 渲染成终端样式；`--no-markdown` 关掉 */
   markdown: boolean;
+  /** 要扫描的 connector 目录，可多次指定 */
+  connectorsPaths: string[];
+  /**
+   * 恢复已持久化的会话。undefined = 未传；true = --resume 不带 id（取最近一次）；
+   * 字符串 = 指定会话 id。
+   */
+  resume: string | boolean | undefined;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -90,6 +109,8 @@ function parseArgs(argv: string[]): CliArgs {
     assistantPrompt: null,
     prefillCommit: null,
     markdown: true,
+    connectorsPaths: [],
+    resume: undefined,
   };
   const positional: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -99,13 +120,29 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === "--verbose" || a === "-v") args.verbose = true;
     else if (a === "--help" || a === "-h") args.help = true;
     else if (a === "--print" || a === "-p") args.print = true;
-    else if (a === "--system-prompt" || a === "-sp") args.systemPrompt = argv[++i] ?? "";
+    else if (a === "--resume") {
+      // id 可省略：下一个参数是另一个 flag 或不存在时，恢复最近一次
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith("-")) {
+        args.resume = next;
+        i += 1;
+      } else {
+        args.resume = true;
+      }
+    } else if (a === "--system-prompt" || a === "-sp") args.systemPrompt = argv[++i] ?? "";
     else if (a === "--append-system-prompt" || a === "-asp") args.appendSystemPrompt = argv[++i] ?? "";
     else if (a === "--user-prompt" || a === "-up") args.userPrompt = argv[++i] ?? "";
     else if (a === "--assistant-prompt" || a === "-ap") args.assistantPrompt = argv[++i] ?? "";
     else if (a === "--prefill-commit" || a === "-pc") args.prefillCommit = argv[++i] ?? "";
     else if (a === "--no-markdown") args.markdown = false;
-    else if (a !== undefined) positional.push(a);
+    else if (a === "--connectors") {
+      const dir = argv[++i];
+      if (dir === undefined) {
+        console.error("错误：--connectors 后面需要跟一个目录路径");
+        process.exit(2);
+      }
+      args.connectorsPaths.push(dir);
+    } else if (a !== undefined) positional.push(a);
   }
   args.prompt = positional.join(" ").trim();
   return args;
@@ -122,6 +159,45 @@ async function resolvePrompt(fromArgs: string, stdinIsTty: boolean): Promise<str
   if (stdinIsTty) return null;
   const piped = (await readStdin()).trim();
   return piped.length > 0 ? piped : null;
+}
+
+/** Connector 启动结果摘要，给启动横幅展示用 */
+interface ConnectorSummary {
+  loadedCount: number;
+  toolCount: number;
+}
+
+/**
+ * 跑一遍 Loader → adopt → start，失败信息走 console.error，但不阻塞 agent 启动。
+ *
+ * 返回的 summary 仅用于横幅展示——agent 实际用的是 runtime 里的 tool 集合。
+ */
+async function bootstrapConnectors(
+  runtime: ConnectorRuntime,
+  paths: readonly string[],
+): Promise<ConnectorSummary> {
+  if (paths.length === 0) return { loadedCount: 0, toolCount: 0 };
+
+  const loader = new ConnectorLoader({ paths: [...paths] });
+  const { loaded, failed } = await loader.scan();
+  for (const f of failed) {
+    console.error(`[connector] load failed: ${f.rootDir} -> ${f.error}`);
+  }
+  for (const c of loaded) runtime.adopt(c);
+  if (loaded.length === 0) return { loadedCount: 0, toolCount: 0 };
+
+  const startFailed = await runtime.start();
+  for (const id of startFailed) {
+    const c = runtime.registry.get(id);
+    console.error(
+      `[connector] start failed: ${id}${c?.errorMessage !== undefined ? ` -> ${c.errorMessage}` : ""}`,
+    );
+  }
+  const started = loaded.length - startFailed.length;
+  return {
+    loadedCount: started,
+    toolCount: started > 0 ? runtime.extraTools().length : 0,
+  };
 }
 
 /** 极简 .env 加载：不覆盖已存在的环境变量 */
@@ -153,20 +229,39 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  // Connector bootstrap：扫描目录 → adopt → start，失败不阻塞（只 warn）
+  const connectorRuntime = new ConnectorRuntime({ cwd });
+  const connectorSummary = await bootstrapConnectors(connectorRuntime, args.connectorsPaths);
+
   const assembled = await assembleSession({
     cwd,
     modelSpec: args.model,
     ...(args.systemPrompt !== null ? { systemPrompt: args.systemPrompt } : {}),
     ...(args.appendSystemPrompt !== null ? { appendSystemPrompt: args.appendSystemPrompt } : {}),
     ...(seedResult.seeds.length > 0 ? { seedMessages: seedResult.seeds } : {}),
+    ...(connectorRuntime.size() > 0 ? { extraTools: connectorRuntime.extraTools() } : {}),
   });
   const { state, queue } = assembled;
   // resolved 后续 /model 命令会改，所以单独拎出来
   let resolved = assembled.resolved;
   let verbose = args.verbose;
 
-  let renderer: TerminalRenderer | undefined;
+  // 会话持久化：--resume 整体还原会话树（含 compact 旧分支）；失败降级为全新会话。
+  // 信息走 stderr——print 模式的 stdout 是答案本身，不能混入进度文本。
+  if (args.resume !== undefined) {
+    const id = typeof args.resume === "string" ? args.resume : await latestSessionId(cwd);
+    if (id === null) {
+      console.error("提示：没有可恢复的会话（.c-agent/sessions/ 为空），按全新会话启动");
+    } else if (await loadSessionInto(state, cwd, id)) {
+      console.error(`已恢复会话 ${id}（${state.messages.length} 条消息）`);
+    } else {
+      console.error(`提示：会话 ${id} 不存在或已损坏，按全新会话启动`);
+    }
+  }
+
   let onEvent: (event: AgentEvent) => void;
+  let exitCode: number;
+  try {
   if (printMode) {
     const sink = createPrintOutput();
     onEvent = (event: AgentEvent): void => sink.onEvent(event);
@@ -178,133 +273,86 @@ async function main(): Promise<number> {
       console.error(
         "print 模式需要一个提示词：用位置参数传入（npm start -- -p \"你的问题\"），或通过管道/重定向喂给 stdin。",
       );
-      return 2;
-    }
-    if (resolved.degraded !== undefined) console.error(`提示：${resolved.degraded}`);
-
-    const agent = new Agent({ state, queue, stream: resolved.stream, onEvent });
-    if (prompt.length > 0) agent.enqueueUser(prompt);
-    await agent.run();
-
-    const answer = sink.answer.trim();
-    if (answer.length > 0) {
-      process.stdout.write(`${renderMarkdown(answer, { enabled: markdown })}\n`);
-    }
-    for (const warning of sink.warnings) process.stderr.write(`${warning}\n`);
-    for (const error of sink.errors) process.stderr.write(`错误：${error}\n`);
-
-    if (sink.errors.length > 0) return 1;
-    if (answer.length === 0) {
-      process.stderr.write("代理没有产生任何输出\n");
-      return 1;
-    }
-    return 0;
-  }
-
-  const sink = new TerminalRenderer({ verbose, markdown });
-  renderer = sink;
-  onEvent = (event: AgentEvent): void => sink.handle(event);
-
-  let stream: StreamFn = resolved.stream;
-
-  const agent = new Agent({ state, queue, stream, onEvent });
-
-  const input = new InputController();
-  input.onSigint(() => {
-    if (agent.isRunning) {
-      agent.abort();
-      console.log("\n(已请求中断，正在收尾)");
+      exitCode = 2;
     } else {
-      input.close();
-      process.exit(0);
+      if (resolved.degraded !== undefined) console.error(`提示：${resolved.degraded}`);
+
+      const agent = new Agent({ state, queue, stream: resolved.stream, onEvent });
+      if (prompt.length > 0) agent.enqueueUser(prompt);
+      await agent.run();
+
+      const answer = sink.answer.trim();
+      if (answer.length > 0) {
+        process.stdout.write(`${renderMarkdown(answer, { enabled: markdown })}\n`);
+      }
+      for (const warning of sink.warnings) process.stderr.write(`${warning}\n`);
+      for (const error of sink.errors) process.stderr.write(`错误：${error}\n`);
+
+      if (sink.errors.length > 0) exitCode = 1;
+      else if (answer.length === 0) {
+        process.stderr.write("代理没有产生任何输出\n");
+        exitCode = 1;
+      } else {
+        exitCode = 0;
+      }
     }
-  });
+  } else {
+    const sink = new TerminalRenderer({ verbose, markdown });
+    onEvent = (event: AgentEvent): void => sink.handle(event);
 
-  console.log(`编码代理已启动`);
-  console.log(`  工作目录：${cwd}`);
-  console.log(`  模型：${resolved.model.provider}:${resolved.model.id}`);
-  console.log(`  工具：${allTools.map((t) => t.name).join(", ")}`);
-  if (resolved.degraded !== undefined) console.log(`  提示：${resolved.degraded}`);
-  console.log(`  输入 /help 查看命令，Ctrl-C 中断当前任务，Ctrl-D 退出。\n`);
+    let stream: StreamFn = resolved.stream;
 
-  // 运行期间把终端输入搬运到中途插入队列
-  const pump = setInterval(() => {
-    if (!agent.isRunning) return;
-    for (const text of input.drainSteering()) agent.steer(text);
-  }, 120);
-  pump.unref();
+    const agent = new Agent({ state, queue, stream, onEvent, persistSessions: true });
 
-  try {
+    const input = new InputController();
+
+    console.log(`编码代理已启动`);
+    console.log(`  工作目录：${cwd}`);
+    console.log(`  模型：${resolved.model.provider}:${resolved.model.id}`);
+    console.log(`  工具：${state.tools.map((t) => t.name).join(", ")}`);
+    if (connectorSummary.loadedCount > 0) {
+      console.log(`  Connector：${connectorSummary.loadedCount} 个 / ${connectorSummary.toolCount} 个工具`);
+    }
+    if (resolved.degraded !== undefined) console.log(`  提示：${resolved.degraded}`);
+    console.log(`  输入 /help 查看命令，Ctrl-C 中断当前任务，Ctrl-D 退出。\n`);
+
     // 启动时若提供了 user-prompt / assistant-prompt，先跑一轮（prefill 同理）
     if (seedResult.seeds.length > 0) {
       await agent.run();
     }
 
-    while (true) {
-      const line = await input.ask("› ");
-      const trimmed = line.trim();
-      if (trimmed.length === 0) continue;
-
-      if (trimmed.startsWith("/")) {
-        const [command, ...rest] = trimmed.slice(1).split(/\s+/);
-        const argument = rest.join(" ").trim();
-
-        switch (command) {
-          case "exit":
-          case "quit":
-            return 0;
-
-          case "help":
-            console.log(HELP);
-            break;
-
-          case "tools":
-            for (const t of allTools) console.log(`  ${t.name} — ${t.description}`);
-            break;
-
-          case "usage": {
-            const u = totalUsage(state);
-            console.log(`  input ${u.input} / output ${u.output} / 合计 ${u.total}`);
-            break;
-          }
-
-          case "clear":
-            state.messages.length = 0;
-            console.log("  对话历史已清空");
-            break;
-
-          case "verbose":
-            verbose = !verbose;
-            renderer?.setVerbose(verbose);
-            console.log(`  思考过程显示：${verbose ? "开" : "关"}`);
-            break;
-
-          case "model": {
-            if (argument.length === 0) {
-              console.log(`  当前模型：${state.model.provider}:${state.model.id}`);
-              break;
-            }
-            resolved = resolveModelSpec(argument).resolved;
-            stream = resolved.stream;
-            agent.setModel(resolved.model, stream);
-            console.log(`  已切换到 ${resolved.model.provider}:${resolved.model.id}`);
-            if (resolved.degraded !== undefined) console.log(`  提示：${resolved.degraded}`);
-            break;
-          }
-
-          default:
-            console.log(`  未知命令：/${command}，输入 /help 查看可用命令`);
-        }
-        continue;
-      }
-
-      agent.enqueueUser(trimmed);
-      await agent.run();
-    }
-  } finally {
-    clearInterval(pump);
-    input.close();
+    exitCode = await runRepl({
+      agent,
+      state,
+      queue,
+      allTools: state.tools,
+      helpText: HELP,
+      input,
+      output: (text) => process.stdout.write(text),
+      initialVerbose: verbose,
+      onToggleVerbose: (next) => {
+        verbose = next;
+        sink.setVerbose(next);
+      },
+      resolveNewModel: (spec) => {
+        const { resolved: newResolved } = resolveModelSpec(spec);
+        // 复用同一个变量存回去；调用方拿到的是新 model + stream
+        resolved = newResolved;
+        stream = newResolved.stream;
+        const out: { model: typeof newResolved.model; stream: StreamFn; degraded?: string } = {
+          model: newResolved.model,
+          stream: newResolved.stream,
+        };
+        if (newResolved.degraded !== undefined) out.degraded = newResolved.degraded;
+        return out;
+      },
+      getUsage: () => usageSnapshot(state),
+    });
   }
+  } finally {
+    await connectorRuntime.dispose();
+  }
+  return exitCode!;
 }
 
 main().then(

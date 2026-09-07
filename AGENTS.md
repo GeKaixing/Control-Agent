@@ -5,10 +5,52 @@
 ## 这是什么
 
 一个用 TypeScript 写的终端编码代理：外层循环处理一轮轮用户请求，内层循环处理当前请求里
-「模型 ↔ 工具」的多轮往返。模型接口与厂商无关（OpenAI / Anthropic / mock 三个适配器收敛成
+「模型 ↔ 工具」的多轮往返。模型接口与厂商无关（OpenAI / Anthropic / Gemini /mock 三个适配器收敛成
 同一个 `StreamFn`），工具可插拔。
 
 架构细节、工具清单、上下文管理策略见 [README.md](README.md)。
+
+## 设计哲学
+
+如果模型越来越强大，哪些 agent 能力是可以消失的？
+
+harness 里的每一段逻辑、每一条系统提示词规则，都应该拿这个问题过一遍：模型对齐变好后
+会自然做对的事（比如「闲聊别调工具」这类规则），优先让给模型，而不是在代码里替它兜底。
+加能力之前先问能不能少加——消失掉的代码就是最好的代码。
+
+### 五支柱
+
+评估任何设计或改动时，沿这 5 个维度过一遍。每根支柱都问同一个问题：
+**这件事是 harness 的职责，还是模型变强后自己能做对？**
+
+- **Model** — 模型本身的能力与配置。harness 只做「失败后调参」：重试
+  （`AgentOptions.maxStreamRetries`）、失败驱动的 thinkingLevel 升档、按端点发
+  `reasoning_effort`。不替模型决定怎么思考，也不在提示词里教它已经会的事。
+- **Context** — 模型真正看到的那份上下文。会话树、`transformContext` 三步后处理、
+  跨会话记忆注入（`collectProjectMemory`）、中途插话合并。问法：这条记忆/清理逻辑
+  是不是模型自己能从上下文推断出来？能就不写代码，写进 memory 工具让它自己记。
+- **Tool** — 工具的形状与观测质量。工具描述让模型一眼会用，执行结果给足续读线索
+  （read 未读完的 offset 提示、二进制格式提示）。工具信息给得越好，兜底规则就越少。
+- **Permission** — 什么必须过人。只拦「不可逆 / 灾难级」：`approvalGate`（mutating
+  工具执行前回调）、bash 灾难命令护栏（`matchCatastrophicCommand`）。bash 本身标
+  mutating，逐次审批时 `cat > file` 之类的绕行口同样过门，无暗道。边界：**审批是
+  桌面端能力**，CLI（REPL/print）不接 approvalGate，靠灾难护栏兜底（终端场景逐条
+  确认不现实）；桌面弹窗带 write/edit 的 `-/+` diff 预览（`desktop/main/approval-diff.ts`）。
+  定位要诚实：**审批是知情同意机制，不是安全边界**——它防「犯错的
+  模型」（真实运行态），防不了「存心绕的模型」；后者只能靠能力收缩（不给 bash /
+  OS 沙箱 / 容器，Environment 支柱的事），在 harness 里堆反绕过正则是打不赢的
+  军备竞赛，不加。更进一步：**代码本身就是通用逃逸通道**——审批看得到写了什么，
+  看不到写下的东西之后会做什么（文本层审批 ≠ 行为层边界）。coding agent 的真边界
+  只有执行环境：沙箱 / 容器 / 无网 / 只读挂载（Environment 支柱），加上 git 提供
+  事后回滚。审批层只负责「提前知情」，不假装自己是边界。
+- **Environment** — 模型对运行环境的感知与真边界，分三层。**感知**：事实给足不写
+  规则——cwd、platform / Node、当前日期、shell（系统提示词），git 快照（branch +
+  未提交文件数）；模型知道得越准，猜错越少，兜底规则越少。**可逆性**：git 承担
+  事后回滚，是本机场景下实际最强的「权限」。**隔离**：沙箱 / 容器 / 无网是终极
+  职责——等分发或跑不可信任务再上（与 Electron sandbox 同一决策模式），不在
+  审批层补课。
+
+用法：新增能力前先判断它落在哪根支柱、按消失之问是否真的需要存在，再动手。
 
 ## 项目结构
 
@@ -23,7 +65,7 @@ graph TD
   Print --> Agent
   Index --> Agent[agent/agent.ts<br/>外层 user · 内层 model↔tool]
   Agent -->|stream 调用| Providers[providers/*<br/>openai / anthropic / mock]
-  Agent -->|tool 调用| Tools[tools/_registry<br/>read·write·edit·bash·glob·grep]
+  Agent -->|tool 调用| Tools[tools/_registry<br/>read·write·edit·bash·glob·grep·memory]
   Agent -->|AgentEvent| Renderer[ui/renderer.ts<br/>终端着色输出]
   Agent -->|notice/done/error| Index
 ```
@@ -48,6 +90,7 @@ g/
 │   │   ├── state.ts              会话状态 + 会话树（节点 / ★ / 分支）、token 与 usage
 │   │   ├── transform.ts          transformContext：清理→压缩→裁剪
 │   │   ├── queue.ts              MessageQueue（中途指令合并）
+│   │   ├── sessions.ts           会话持久化（.c-agent/sessions/<id>.json，--resume 还原）
 │   │   └── doc/                  子模块文档（README.md）
 │   ├── providers/              模型适配器（缺 key 自动降级 mock）
 │   │   ├── stream.ts             StreamAccumulator（流式 → 完整消息）
@@ -57,7 +100,7 @@ g/
 │   │   ├── mock.ts               离线测试与 print 模式
 │   │   ├── index.ts              resolveModel + providers 表
 │   │   └── doc/                  子模块文档（README.md）
-│   ├── tools/                  6 个内置工具
+│   ├── tools/                  7 个内置工具
 │   │   ├── types.ts              Tool 接口 + ok() / fail()
 │   │   ├── validate.ts           JSON Schema 参数校验
 │   │   ├── fs-utils.ts           resolvePath / truncateText / 跳过隐藏目录
@@ -68,6 +111,7 @@ g/
 │   │   ├── bash.ts               超时 + 输出截断（默认 120s/100K 字符）
 │   │   ├── glob.ts               走 fs-utils 的 walk
 │   │   ├── grep.ts               ripgrep 后端
+│   │   ├── memory.ts             跨会话记忆（追加式存储，写入项目根 MEMORY.md）
 │   │   ├── index.ts              TOOL_REGISTRY + ToolName 派生源
 │   │   └── doc/                  子模块文档（README.md）
 │   ├── ui/                     终端交互
@@ -78,7 +122,11 @@ g/
 │   │   └── doc/                  子模块文档（README.md）
 │   └── doc/                    src/ 全局文档（README.md：数据流图 + 约定）
 └── tests/
-    └── run.ts                零依赖运行器，当前 46 个用例
+    ├── run.ts                入口：编排 + 直接 import 内部模块的单元/集成测试（48）
+    ├── registry.ts           用例注册中心（test / main / sleep / stripAnsi）
+    ├── manual.ts             ManualSession：spawn 真子进程 + in-process FakeInput
+    ├── cli-print.ts          spawn 真 c-agent 跑 print 模式的端到端用例（21）
+    └── repl-loop.ts          in-process REPL 循环用例，FakeInput 驱动（17）
 ```
 
 ### 各目录一行职责
@@ -87,10 +135,14 @@ g/
 - **agent/** — 项目的核心；外层等用户输入，内层跑模型 ↔ 工具直到模型给出终态
 - **context/** — 上下文的全部实现：会话树存储、系统提示词、token 估算、交给模型前的三步后处理、消息入队
 - **providers/** — 把各家厂商的流式协议收敛成同一个 `StreamFn`，加供应商只需在这里挂一份
-- **tools/** — 6 个内置工具的注册与共享辅助
+- **tools/** — 7 个内置工具的注册与共享辅助；memory 工具承担跨会话记忆的写入端
 - **ui/** — 渲染器只读 `AgentEvent`，不知道「模型」或「工具」是谁
 - **ui/markdown.ts** — 唯一知道 ANSI 转义序列的地方；`enabled: false` 时纯透传
-- **tests/run.ts** — 端到端 + 单元 + 边界，靠 `node:assert/strict`，无第三方依赖
+- **tests/run.ts** — 入口编排 + 直接 import 内部模块的单元 / 集成测试，最快的那批
+- **tests/registry.ts** — 用例注册中心，子用例文件 `import { test } from "./registry.js"` 自注册
+- **tests/manual.ts** — `ManualSession`：spawn 真子进程做 CLI 测试，或 in-process + `FakeInput` 做 REPL 测试
+- **tests/cli-print.ts / tests/repl-loop.ts** — 子用例文件，分别覆盖 print 模式子进程 + in-process REPL 循环
+
 ## 会话运行时
 
 这一节讲清三件事：c-agent 跑一次请求时**事件流**怎么走、**中途插话**如何合并进上下文、
@@ -170,6 +222,15 @@ sequenceDiagram
 ```
 
 `pendingFollowUps` 是关键：如果它 `>0`，本轮结束时不算「终态」，内层循环会再跑一轮直到归 0。
+
+**串行工具间隙的打断**（借鉴 badlogic/pi-mono）：steering 在串行执行工具的**间隙**也会被
+检查——发现插话就立即停手，剩余调用标 skipped（isError 结果「用户发来了新指令，本次
+工具调用已跳过」）回给模型。下一轮模型同时看到「已执行的结果 + 被跳过的调用 + 用户
+插话」，能马上调整方向，而不是干等所有工具跑完。两条纪律：
+
+- 打断检查只**偷看**队列（`hasSteering()`）不取，注入仍由内层循环顶部统一做——保证
+  `toolResult` 紧跟 `assistant(toolCalls)` 的消息顺序不破（OpenAI/Anthropic 都要求这个顺序）。
+- skipped 的结果不进重复失败计数、不参与动态推理强度升降档——用户打断不是模型的失败。
 
 ### `transformContext` 三步后处理
 
@@ -304,7 +365,7 @@ User #1 → Assistant #1 → User #3 → Assistant #3
 | `npm install` | 装依赖 |
 | `npm start` | 交互模式（无 API key 时自动降级到 mock） |
 | `npm run typecheck` | `tsc --noEmit`，不产出文件 |
-| `npm test` | 跑 `tests/run.ts`，零依赖测试运行器 |
+| `npm test` | 跑 `tests/run.ts`，零依赖运行器；当前 86 个用例（48 单元 / 21 CLI 子进程 / 17 in-process REPL） |
 | `npm run build` | 编译到 `dist/` |
 
 **提交前必跑：`npm run typecheck && npm test`。** 两个都干净才算改完。
@@ -357,9 +418,8 @@ User #1 → Assistant #1 → User #3 → Assistant #3
    } as const;
    ```
 
-   `ToolName` 联合从 `_registry` 自动派生（`keyof typeof _registry`）。
-   `findTool(name: ToolName)` 的参数因此编译期收紧——拼错立刻报错。
-   `_registry` 顶部还有 `_AllAreTools` 类型断言，确保每个值 implements `Tool`。
+  `ToolName` 联合从 `_registry` 自动派生（`keyof typeof _registry`）。
+  `_registry` 顶部还有 `_AllAreTools` 类型断言，确保每个值 implements `Tool`。
 
 `isMutating` 很关键：一批调用里只要有一个是 `true`，整批就退回串行执行。
 只读工具标成 `true` 会白白牺牲并行，会改文件的标成 `false` 则可能并发写坏东西。
@@ -385,19 +445,77 @@ User #1 → Assistant #1 → User #3 → Assistant #3
 
 ## 测试
 
-`tests/run.ts` 是自带的零依赖运行器，用 `tsx` 跑，没有 jest/vitest。
+零依赖运行器（`node:assert/strict` + `tsx`），没有 jest/vitest。当前 86 个用例分三类：
+
+| 文件 | 关注 | 用例数 |
+| --- | --- | --- |
+| `tests/run.ts` | import 内部模块测单元 / 集成 / 边界，最快 | 48 |
+| `tests/cli-print.ts` | spawn 真 c-agent 跑 print 模式 | 21 |
+| `tests/repl-loop.ts` | `FakeInput` 驱动 `src/ui/repl.ts` 的循环 | 17 |
+
+子用例文件通过 `tests/registry.ts` 自注册——加新分类时新写一个 `.ts` 用 `import { test } from "./registry.js"`，再在 `tests/run.ts` 顶部加一行 import 即可。
+
+### 直接单元 / 集成测试（最常用）
 
 ```ts
+import { test, assert } from "./registry.js";
+
 test("用一句话说明验证什么", async () => {
-  assert.equal(actual, expected);   // node:assert/strict
+  assert.equal(actual, expected);
 });
 ```
 
-已有辅助：`runAgent({ cwd, prompt, stream?, tools?, allowParallelTools? })` 跑一遍完整代理，
+辅助：`runAgent({ cwd, prompt, stream?, tools?, allowParallelTools? })` 跑一遍完整代理，
 返回 `{ events, messages, durationMs }`；`textOnly(text)` 造纯文本助手消息；
 `tempDir()` 开临时目录。
 
 端到端测试用 `createMockStream({ delayMs: 0 })`，不依赖网络也不需要 API key。
+
+### 手动式自动化测试（CLI / REPL）
+
+交互逻辑靠 TTY，而 `process.stdin.isTTY` 在子进程里永远是 `false`——管道或子进程 fork
+出来的 stdio 一定进 print 模式，测不了 REPL。所以专门抽了两层：
+
+**`src/ui/repl.ts`** 把 REPL 主循环从 `src/index.ts` 抽出来，吃 `LoopInput` 接口；
+`InputController`（真终端 readline）和 `FakeInput`（测试）都实现这个接口。
+
+**`tests/manual.ts`** 的 `ManualSession`：
+
+- `ManualSession.spawn({...})` — 起真子进程跑 `tsx src/index.ts`，
+  `.expect(substring)` / `.send(line)` / `.expectIdle()` 模拟按键 + 等待输出
+- `ManualSession.inProcess({...})` — 不起子进程，用 `FakeInput` 驱动 `runRepl()`，
+  agent 的 `text_delta` 通过 `pumpOutput()` 灌进 session
+
+子用例样例（`tests/cli-print.ts`）：
+
+```ts
+test("print 模式：stdin 携带提示词，stdout 只输出答案", async () => {
+  const s = await ManualSession.spawn({
+    args: ["--model", "mock", "-p"],
+    cwd: repoRoot,
+    stdinPayload: "回我一句 ok",
+  });
+  await s.expect("ok", { timeoutMs: 30_000 });
+  await s.expectExit(0);
+});
+```
+
+子用例样例（`tests/repl-loop.ts`）：
+
+```ts
+test("REPL：/help 应打印可用命令", async () => {
+  const s = ManualSession.inProcess({ cwd: repoRoot });
+  await startRepl(s);              // 串好 onEvent / queue / FakeInput
+  s.input.pushLine("/help");
+  await s.expect("/help");
+  s.input.pushEof();
+  await s.expectExit(0);
+});
+```
+
+子进程 spawn 时 `cleanEnv()` 会自动清空 `*_API_KEY` 和 `MODEL`，确保 mock 真的能跑；tsx loader
+路径用 `createRequire(import.meta.url).resolve("tsx")` 拿绝对地址，避免子进程 cwd=/tmp 时
+`Cannot find package 'tsx'`。
 
 ## 提示词覆盖（CLI 注入）
 

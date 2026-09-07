@@ -5,6 +5,7 @@ import { bashTool, resolveShell, type ShellSpec } from "./bash.js";
 import { editTool } from "./edit.js";
 import { globTool } from "./glob.js";
 import { grepTool } from "./grep.js";
+import { memoryTool } from "./memory.js";
 import { readTool } from "./read.js";
 import type { Tool } from "./types.js";
 import { describeSchema } from "./validate.js";
@@ -26,6 +27,7 @@ const _registry = {
   bash: bashTool,
   glob: globTool,
   grep: grepTool,
+  memory: memoryTool,
 } as const;
 
 export const TOOL_REGISTRY = _registry;
@@ -37,25 +39,27 @@ void _checkAll;
 
 export const allTools: Tool[] = Object.values(TOOL_REGISTRY);
 
-/** 按名字查找工具。参数必须是合法工具名（拼错编译期会报错）。 */
-export function findTool(name: ToolName): Tool | undefined {
-  return TOOL_REGISTRY[name];
-}
+/**
+ * 转成模型可理解的 tool 声明，并把参数签名写进描述里以提高调用准确率。
+ * describeSchema 遍历整套 JSON Schema 且每次 stringify，是每轮调模型
+ * 都要走的路径 —— 工具表按引用不可变，这里按数组引用缓存结果。
+ */
+const describeCache = new WeakMap<Tool[], LlmTool[]>();
 
-/** 列出所有可用工具的名字，按注册顺序 */
-export function toolNames(): ToolName[] {
-  return Object.keys(TOOL_REGISTRY) as ToolName[];
-}
-
-/** 转成模型可理解的 tool 声明，并把参数签名写进描述里以提高调用准确率 */
 export function describeToolsForModel(tools: Tool[] = allTools): LlmTool[] {
-  return tools.map((t) => ({
+  const cached = describeCache.get(tools);
+  if (cached !== undefined) return cached;
+
+  const described = tools.map((t) => ({
     name: t.name,
     description: `${t.description} 参数：${describeSchema(t.parameters)}`,
     parameters: t.parameters,
   }));
+  describeCache.set(tools, described);
+  return described;
 }
 
 export type { Tool, ToolContext, ToolResult } from "./types.js";
-export { bashTool, editTool, globTool, grepTool, readTool, writeTool, resolveShell };
+export { bashTool, editTool, globTool, grepTool, memoryTool, readTool, writeTool, resolveShell };
+export { memoryPath, MEMORY_FILE } from "./memory.js";
 export type { ShellSpec };

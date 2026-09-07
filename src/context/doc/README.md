@@ -70,7 +70,7 @@ function activeBranch(state): AgentMessage[];         // ★ → Root 反转后�
 // 实用
 function buildSystemPrompt(cwd, toolNames): string;   // 默认系统提示词
 function estimateTokens(messages, systemPrompt): number;  // 粗估：中文 1.5 字/token，其余 4 字/token
-function lastMessage(state): AgentMessage | undefined;
+function calibrateCharsPerToken(state, charsSent, inputTokens): void;  // usage 反馈 EMA 校准
 function totalUsage(state): { input; output; total };
 ```
 
@@ -85,10 +85,14 @@ linear := activeBranch(state)      // ★ → Root 反转
 [1] dropOrphanToolResults()        // 删掉没有对应 toolCall.id 的 toolResult（异常流中断会留下）
        │
        ▼
-[2] pruneOldTurns()                // 早期轮次的 assistant 抹掉 thinking，toolResult 按 maxToolResultChars 截断
+[2] pruneOldTurns()                // 早期轮次的 assistant 抹掉 thinking；
+                                   //   超长 toolResult：成功 → 整条替换成占位指针，
+                                   //   error → 保留内容只做头尾截断
        │
        ▼
-[3] trimToBudget()                 // 仍超预算 → 按整轮从最早的开始丢（不拆散 assistant + toolResult）
+[3] trimToBudget()                 // 迟滞裁剪：超 触发线（预算×0.85）才进入，
+                                   //   一次丢整轮到 目标线（预算×0.7）以下为止
+                                   //   （两次裁剪之间前缀字节级稳定，保 provider 前缀缓存）
        │
        ▼
 TransformedContext { messages, systemPrompt, tools, droppedMessages, prunedToolResults }
@@ -101,10 +105,24 @@ TransformedContext { messages, systemPrompt, tools, droppedMessages, prunedToolR
 
 | 字段 | 值 | 含义 |
 | --- | --- | --- |
-| `maxContextTokens` | 120 000 | 模型上下文上限 |
+| `maxContextTokens` | 120 000 | 模型上下文上限（默认值）。桌面端经 `maxContextTokensFor(模型真实窗口)` 覆写——`/models` 元数据优先、粗表兜底 |
 | `reservedTokens`   | 8 000 | 为回复预留 |
 | `keepRecentTurns`  | 2 | 无论如何都要保住的最近轮数 |
-| `maxToolResultChars` | 4 000 | 旧工具结果的截断长度 |
+| `maxToolResultChars` | 4 000 | 旧工具结果的省略阈值（成功结果换指针，error 截断） |
+| `trimTriggerRatio` | 0.85 | 迟滞裁剪触发线（预算 × ratio） |
+| `trimTargetRatio`  | 0.7 | 迟滞裁剪目标线（预算 × ratio） |
+
+自动 compact（`shouldAutoCompact`）：agent 内层循环每轮开跑前，用与 `trimToBudget`
+同一套预算 / 口径 / 触发线判定上下文是否越线；越线则先让模型把历史摘要成新 Root
+（`Agent.compact()` 的内部路径），抢在 [1]–[3] 的机械处理之前——摘要保得住要点，
+丢轮次 / 换指针做不到。压缩失败自动落回本管线兜底，本次 run 内不再重试
+（`AgentOptions.autoCompact: false` 可整体关闭）。
+
+**token 口径自校准**（state.ts）：固定 chars/token（3.5）在中文 + 代码混合场景偏差可达 ±30%。
+`agent.ts` 每次真实调用后把「发出去的字符量 ÷ `usage.input`（prompt_tokens）」喂给
+`calibrateCharsPerToken(state, chars, tokens)` 做 EMA（α=0.3，观测值限幅 1.5~8 防异常
+provider 污染），结果存 `state.observedCharsPerToken`；`trimToBudget` 优先用它，
+无观测时回落 3.5。
 
 ## queue.ts —— 两条独立通道
 
@@ -149,4 +167,20 @@ class MessageQueue {
 - **`state.messages` 不要从外部直接赋值**：会绕过树的维护。除非你确认自己就是「老 fallback
   模式」（几乎不会）。
 - **`currentNodeId === null` ≠ 空会话**：建 state 时一定是 `null`；只要 `appendNode` 一次就
-  就被推进了。判断「有没有活干」应该读 `lastMessage(state)` 的 `role`（`agent.ts:hasPendingWork`）。
+  就被推进了。判断「有没有活干」应该读 ★ 节点（或 messages 末位）消息的 `role`
+  （`agent.ts:hasPendingWork`）。
+
+## 会话持久化（sessions.ts）
+
+会话树（`AgentState.nodes`）可整体 JSON 序列化——每条消息是带 parent/children
+指针的节点，`saveSession` 原子写（tmp + rename）到 `.c-agent/sessions/<id>.json`，
+`loadSessionInto` 整树还原后从 ★ 重算线性视图；compact 留下的旧分支一并回来，
+`switchTo` 仍可回溯。接入点：
+
+- **自动保存**：`AgentOptions.persistSessions`（默认 false）→ 每次 `agent_end`
+  后落盘，同一 state 复用同一个会话 id；CLI 交互模式已开启。
+- **恢复**：CLI `--resume [id]`（省略 id 取最近一次）；REPL `/sessions` 列清单。
+- 与 memory 工具的分工：项目根 `MEMORY.md` 是模型自己记的「跨会话有效事实」，
+  注入系统提示词；sessions 是完整对话历史，只在恢复时整体读回，不注入。
+- 不做的事：不摘要、不清洗、不做保留期——哪些内容值得留是 transformContext
+  管线的事，这里只管字节。

@@ -1,0 +1,127 @@
+/*
+ * 桌面端全局样式：Tailwind v4 + shadcn/ui 浅色（白底）主题。
+ *
+ * v4 架构说明：
+ * - `@import "tailwindcss"` 替代 v3 的三个 `@tailwind` 指令。
+ * - 自动扫描 JS / HTML / TSX 里的 class 名（无须 `content` 数组）。
+ * - 用 `@source` 显式追加扫描路径，给 Tailwind 多一个保险。
+ * - 设计令牌（颜色 / 圆角）走 `@theme inline` 块；令牌值用 `var(--xxx)` 直接引用，
+ *   不需要再包 `hsl()`，因为 `:root` 里已经把值定义成完整 hsl(...) 串。
+ */
+
+@import "tailwindcss";
+
+/* 在 Vite root 之外补一句 source，告诉 Tailwind 多扫一份 */
+@source "../renderer/src/**/*.{ts,tsx}";
+
+/* ───────────── 设计令牌 ───────────── */
+
+/* 默认 = 浅色（白底深字）。符合 shadcn 标准模板；
+ * 之前的版本 `:root` 直接给 dark 调色板，导致主体显示深蓝。 */
+:root {
+  --background: hsl(0 0% 100%);
+  --foreground: hsl(222.2 84% 4.9%);
+  --card: hsl(0 0% 100%);
+  --card-foreground: hsl(222.2 84% 4.9%);
+  --popover: hsl(0 0% 100%);
+  --popover-foreground: hsl(222.2 84% 4.9%);
+  --primary: hsl(222.2 47.4% 11.2%);
+  --primary-foreground: hsl(210 40% 98%);
+  --secondary: hsl(210 40% 96.1%);
+  --secondary-foreground: hsl(222.2 47.4% 11.2%);
+  --muted: hsl(210 40% 96.1%);
+  --muted-foreground: hsl(215.4 16.3% 46.9%);
+  --accent: hsl(210 40% 96.1%);
+  --accent-foreground: hsl(222.2 47.4% 11.2%);
+  --destructive: hsl(0 84.2% 60.2%);
+  --destructive-foreground: hsl(210 40% 98%);
+  --border: hsl(214.3 31.8% 91.4%);
+  --input: hsl(214.3 31.8% 91.4%);
+  --ring: hsl(222.2 84% 4.9%);
+  --radius: 0.5rem;
+}
+
+/* 手动加 .dark 类时切到深色主题；默认不挂就不生效 */
+.dark {
+  --background: hsl(222.2 84% 4.9%);
+  --foreground: hsl(210 40% 98%);
+  --card: hsl(222.2 47.4% 11.2%);
+  --card-foreground: hsl(210 40% 98%);
+  --popover: hsl(222.2 84% 4.9%);
+  --popover-foreground: hsl(210 40% 98%);
+  --primary: hsl(217.2 91.2% 59.8%);
+  --primary-foreground: hsl(222.2 47.4% 11.2%);
+  --secondary: hsl(217.2 32.6% 17.5%);
+  --secondary-foreground: hsl(210 40% 98%);
+  --muted: hsl(217.2 32.6% 17.5%);
+  --muted-foreground: hsl(215 20.2% 65.1%);
+  --accent: hsl(217.2 32.6% 17.5%);
+  --accent-foreground: hsl(210 40% 98%);
+  --destructive: hsl(0 62.8% 30.6%);
+  --destructive-foreground: hsl(210 40% 98%);
+  --border: hsl(217.2 32.6% 22.5%);
+  --input: hsl(217.2 32.6% 22.5%);
+  --ring: hsl(224.3 76.3% 48%);
+}
+
+/* Tailwind 把 @theme inline 里的 --color-* 解析为 utility color（bg-background 等）；
+ * 用 var(--background) 直接引，避免 v3 时代 "hsl(var(--background))" 的双层包。 */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* 圆角：v3 里叫 borderRadius.lg/md/sm，对应 v4 的 --radius-* 命名空间 */
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+
+  /* shadcn container 工具（v3 里是 theme.container） */
+  --container-padding: 1rem;
+}
+
+/* ───────────── 基础 reset ───────────── */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+}
+
+body {
+  overflow: hidden;
+}
+
+/* 流式输出时光标闪烁 */
+.live-cursor::after {
+  content: "▍";
+  color: var(--muted-foreground);
+  animation: blink 0.8s steps(2) infinite;
+}
+
+@keyframes blink {
+  to {
+    opacity: 0;
+  }
+}

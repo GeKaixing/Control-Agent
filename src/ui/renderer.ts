@@ -118,6 +118,12 @@ export class TerminalRenderer {
         );
         break;
 
+      case "context_compact":
+        process.stdout.write(
+          `${YELLOW}上下文已压缩：${event.replacedMessages} 条消息 → ${event.summaryChars} 字符摘要（旧分支保留在会话树中）${RESET}\n`,
+        );
+        break;
+
       case "notice":
         process.stdout.write(`${YELLOW}${event.message}${RESET}\n`);
         break;

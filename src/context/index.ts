@@ -14,17 +14,33 @@ export {
   addNodeAt,
   appendNode,
   buildSystemPrompt,
+  calibrateCharsPerToken,
   createInitialState,
   currentNode,
   estimateTokens,
-  lastMessage,
+  messageChars,
   pathToRoot,
   switchTo,
   totalUsage,
 } from "./state.js";
 export type { AgentState, MessageNode, SeedMessage } from "./state.js";
 
-export { defaultTransformOptions, transformContext } from "./transform.js";
+export {
+  defaultTransformOptions,
+  maxContextTokensFor,
+  shouldAutoCompact,
+  transformContext,
+} from "./transform.js";
 export type { TransformOptions, TransformedContext } from "./transform.js";
 
 export { MessageQueue } from "./queue.js";
+
+export {
+  latestSessionId,
+  listSessions,
+  loadSessionInto,
+  saveSession,
+  sessionFileExists,
+  sessionsDir,
+  type SessionSummary,
+} from "./sessions.js";

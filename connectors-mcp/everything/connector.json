@@ -1,0 +1,8 @@
+{
+  "id": "mcp-everything",
+  "version": "0.1.0",
+  "type": "cli",
+  "description": "桥接官方 MCP 测试服务器 @modelcontextprotocol/server-everything v2.0.0（echo / add / printEnv / longRunningOperation 等）。工具集随包版本变化，capabilities 留空由运行时 tools/list 决定。",
+  "capabilities": [],
+  "entry": "index.ts"
+}

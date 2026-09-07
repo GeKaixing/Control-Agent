@@ -34,7 +34,13 @@ export const readTool: Tool = {
     if (stat.isDirectory()) return fail(`这是一个目录，不是文件：${abs}`);
 
     const text = await readTextFile(abs);
-    if (text === null) return fail(`无法按文本读取（可能是二进制文件）：${abs}`);
+    if (text === null) {
+      const ext = abs.slice(abs.lastIndexOf(".") + 1).toLowerCase();
+      const mediaHint = ["png", "jpg", "jpeg", "gif", "webp", "pdf", "zip", "mp4", "mp3", "docx", "xlsx", "pptx"].includes(ext)
+        ? `（检测到 .${ext} 媒体/二进制格式，当前工具只能读纯文本；如需内容可用 bash 调用对应解析命令，如 file / strings / python）`
+        : "（文件含 NUL 字节或读取失败，按二进制处理）";
+      return fail(`无法按文本读取：${abs}\n${mediaHint}`);
+    }
 
     const all = text.split("\n");
     const offset = Math.max(1, Number(args["offset"] ?? 1));
@@ -50,6 +56,10 @@ export const readTool: Tool = {
     );
     const { text: body, truncated } = truncateLines(numbered, MAX_LINES, MAX_LINE_CHARS);
     const header = `${abs}（第 ${offset}-${offset + slice.length - 1} 行，共 ${all.length} 行）`;
-    return ok(`${header}${truncated ? "（已截断）" : ""}\n${body}`);
+    // 观测质量：明确告诉模型文件没读完，别把半截文件当全貌下结论
+    const remaining = all.length - (offset - 1 + slice.length);
+    const tail =
+      remaining > 0 ? `（后续还有 ${remaining} 行未读，可用 offset=${offset + slice.length} 继续读）` : "";
+    return ok(`${header}${truncated ? "（已截断）" : ""}${tail}\n${body}`);
   },
 };

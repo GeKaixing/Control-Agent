@@ -9,6 +9,30 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
 const MAX_OUTPUT_CHARS = 100_000;
 
+/**
+ * 灾难性命令护栏：只拦「不可逆地毁掉整个环境」的极少数模式，
+ * 不拦日常危险操作（rm -rf node_modules / git push --force 是正常工作）。
+ * 命中即 fail，不执行；CAGENT_ALLOW_DANGEROUS=1 可整体关闭（自动化场景逃生口）。
+ * 导出纯函数以便测试，execute 里只做查表。
+ */
+const CATASTROPHIC_PATTERNS: { re: RegExp; why: string }[] = [
+  // rm 的任意 flag 组合里同时含 r 与 f（-rf / -fr / -f -r），目标是根目录或家目录
+  { re: /\brm\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*r[a-zA-Z]*\s+(?:--\s+)?\/(?:\s|$)/, why: "递归删除文件系统根目录 /" },
+  { re: /\brm\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*r[a-zA-Z]*\s+(?:--\s+)?(?:~|\$HOME)(?:\s|$)/, why: "递归删除整个家目录" },
+  { re: /\bmkfs(?:\.\w+)?\b/, why: "格式化文件系统" },
+  { re: /\bdd\b[^|;&]*\bof=\/dev\/(?:sd|nvme|disk|rdisk)/, why: "直接写块设备" },
+  { re: /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/, why: "fork 炸弹" },
+  { re: /\bchmod\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*R[a-zA-Z]*\s+777\s+\/(?:\s|$)/, why: "对根目录递归开放全部权限" },
+];
+
+/** 返回命中的灾难模式说明；未命中返回 null */
+export function matchCatastrophicCommand(command: string): string | null {
+  for (const { re, why } of CATASTROPHIC_PATTERNS) {
+    if (re.test(command)) return why;
+  }
+  return null;
+}
+
 /** 跨平台 shell 描述：file 是可执行路径，args 把命令拼成 argv 数组 */
 export interface ShellSpec {
   file: string;
@@ -146,6 +170,16 @@ export const bashTool: Tool = {
     const command = String(args["command"] ?? "");
     if (command.trim().length === 0) return fail("command 不能为空");
     if (ctx.signal.aborted) return fail("已被用户中断");
+
+    if (process.env["CAGENT_ALLOW_DANGEROUS"] !== "1") {
+      const why = matchCatastrophicCommand(command);
+      if (why !== null) {
+        return fail(
+          `已拦截灾难性命令（${why}）。这条命令不可逆且影响范围是整个环境，已拒绝执行。` +
+            `如确需执行：设置环境变量 CAGENT_ALLOW_DANGEROUS=1，或改写成影响范围明确的等价命令。`,
+        );
+      }
+    }
 
     const requested = Number(args["timeout"] ?? DEFAULT_TIMEOUT_MS);
     const timeoutMs = Math.min(

@@ -21,18 +21,39 @@ function thinkingBudget(level: string, maxTokens: number): number | null {
   }
 }
 
+/** 拆 data URL → { mediaType, base64 }；非 data:base64 形态返回 null */
+function parseDataUrl(dataUrl: string): { mediaType: string; base64: string } | null {
+  const m = /^data:([^;,]+);base64,(.+)$/s.exec(dataUrl);
+  if (m === null) return null;
+  return { mediaType: m[1] ?? "", base64: m[2] ?? "" };
+}
+
 function toAnthropicMessages(messages: LlmMessage[]): unknown[] {
   const out: unknown[] = [];
 
   for (const m of messages) {
     if (m.role === "user") {
-      out.push({
-        role: "user",
-        content: m.content
-          .filter((c) => c.type === "text")
-          .map((c) => (c as { text: string }).text)
-          .join("\n"),
-      });
+      const text = m.content
+        .filter((c) => c.type === "text")
+        .map((c) => (c as { text: string }).text)
+        .join("\n");
+      const images = m.content.filter((c) => c.type === "image");
+      if (images.length === 0) {
+        out.push({ role: "user", content: text });
+        continue;
+      }
+      // 多模态：Anthropic 要求 image block 用 base64 source；image block 需在 text 前
+      const blocks: unknown[] = [];
+      for (const c of images) {
+        const parsed = parseDataUrl((c as { dataUrl: string }).dataUrl);
+        if (parsed === null) continue;
+        blocks.push({
+          type: "image",
+          source: { type: "base64", media_type: parsed.mediaType, data: parsed.base64 },
+        });
+      }
+      if (text.length > 0) blocks.push({ type: "text", text });
+      out.push({ role: "user", content: blocks });
       continue;
     }
 

@@ -10,8 +10,16 @@
  * `state.messages.length = 0` 复位写法不破坏。
  */
 
+import { resolveShell } from "../tools/bash.js";
 import type { Tool } from "../tools/types.js";
-import type { AgentMessage, AssistantMessage, ModelRef, ThinkingLevel, UserMessage } from "../types.js";
+import type {
+  AgentMessage,
+  AssistantMessage,
+  ModelMaturity,
+  ModelRef,
+  ThinkingLevel,
+  UserMessage,
+} from "../types.js";
 import { emptyUsage } from "../types.js";
 
 /**
@@ -55,22 +63,80 @@ export interface AgentState {
   tools: Tool[];
   thinkingLevel: ThinkingLevel;
   cwd: string;
+  /**
+   * 观测的 chars/token 比值（Context 自校准）：agent 每次真实调用模型后，
+   * 用「发出去的字符量 ÷ usage.input（prompt_tokens）」做 EMA 更新
+   * （见 calibrateCharsPerToken）。undefined = 尚无观测，transform 沿用 3.5。
+   */
+  observedCharsPerToken?: number;
+  /**
+   * 会话持久化 id（见 sessions.ts）：saveSession 首次落盘时分配，
+   * loadSessionInto 恢复时带回。undefined = 尚未持久化过。
+   */
+  sessionId?: string;
 }
 
-export function buildSystemPrompt(cwd: string, toolNames: string[]): string {
+/**
+ * 默认系统提示词。两条动态轴（学 pi）：
+ * - guidelines 按实际注册的工具集生成——工具不在场就不写对应规则；
+ * - 行为纪律规则按模型档位生成——maturity "strong" 的模型自身对齐足够，
+ *   「闲聊别调工具」这类为弱模型兜底的规则不再注入（设计哲学：模型变强，能力消失）。
+ */
+export function buildSystemPrompt(
+  cwd: string,
+  toolNames: string[],
+  maturity: ModelMaturity = "budget",
+): string {
+  const names = new Set(toolNames);
+  const strong = maturity === "strong";
+  const workRules: string[] = [];
+
+  if (!strong) {
+    // 恒定第一条：闲聊/纯问答不碰工具（mimo 这档模型必须显式说，学 Cline 句式）
+    workRules.push(
+      "先判断请求类型：打招呼、闲聊、纯知识问答等不需要接触项目的内容，直接用文字回答，一个工具都不要调用。",
+    );
+  }
+
+  if (names.has("grep") || names.has("glob")) {
+    workRules.push(
+      "任务涉及项目内容时，查找优先用 grep / glob 定位，避免整文件大段读入；动手改之前先把上下文看清楚。",
+    );
+  } else if (!strong) {
+    // 兜底句同样是纪律规则，强模型不需要
+    workRules.push("只有任务涉及读代码、查文件、改文件或跑命令时才动手；动手前先把上下文看清楚。");
+  }
+  if (names.has("edit") && names.has("write")) {
+    workRules.push("修改文件优先用 edit 做精确替换；只有大段重写时才用 write。");
+  }
+  if (names.has("bash")) {
+    workRules.push("运行命令用 bash，优先选择只读、可重复的命令验证改动。");
+  }
+
+  const numbered = workRules.map((rule, i) => `${i + 1}. ${rule}`);
   return [
     "你是一个在终端里工作的编码代理。",
     `当前工作目录：${cwd}`,
     `运行时：${process.platform} / Node ${process.version}`,
+    // Environment 支柱：日期与 shell 是模型最高频的两个猜测源（版本 pin、
+    // 「最近」类判断、zsh/bash 语法差异）——事实给足，不写补救规则
+    `当前日期：${localDateLine()}`,
+    `Shell：${resolveShell().file}（bash 工具的命令按它执行）`,
     "",
     "工作方式：",
-    "1. 先用 read / glob / grep 把上下文看清楚，再动手改。",
-    "2. 修改文件优先用 edit 做精确替换；只有大段重写时才用 write。",
-    "3. 运行命令用 bash，优先选择只读、可重复的命令验证改动。",
-    "4. 回答用简体中文，简洁直接，不要复述已经很明显的内容。",
+    ...numbered,
+    `${numbered.length + 1}. 回答用简体中文，简洁直接，不要复述已经很明显的内容。`,
     "",
     `可用工具：${toolNames.join(", ")}`,
   ].join("\n");
+}
+
+/** 会话启动时刻的本地日期 + 星期。一次会话跨零日就让它旧着——不值得为它做动态提示词 */
+function localDateLine(): string {
+  const d = new Date();
+  const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const weekday = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][d.getDay()];
+  return `${date}（${weekday}）`;
 }
 
 export function createInitialState(options: {
@@ -91,7 +157,9 @@ export function createInitialState(options: {
    */
   seedMessages?: SeedMessage[];
 }): AgentState {
-  const base = options.systemPrompt ?? buildSystemPrompt(options.cwd, options.tools.map((t) => t.name));
+  const base =
+    options.systemPrompt ??
+    buildSystemPrompt(options.cwd, options.tools.map((t) => t.name), options.model.maturity);
   const append = options.appendSystemPrompt ?? "";
   const composedSystemPrompt =
     append.length > 0 ? `${base}\n\n# 追加指令\n\n${append}` : base;
@@ -141,29 +209,74 @@ function assistantPrefill(content: string, model: ModelRef): AssistantMessage {
   };
 }
 
+/**
+ * 单条消息的字符量缓存：消息对象按约定不可变（transform 只创建新对象，不改旧的），
+ * 可以按对象身份缓存。最贵的是 toolCall 的 JSON.stringify(arguments)，
+ * transformContext 每轮都会重算全量 token，缓存后重复扫描全部命中。
+ */
+const messageCharsCache = new WeakMap<AgentMessage, number>();
+
+/** 单条消息的字符量（与 estimateTokens 的分项口径一致） */
+export function messageChars(m: AgentMessage): number {
+  const cached = messageCharsCache.get(m);
+  if (cached !== undefined) return cached;
+
+  let chars: number;
+  if (m.role === "user") {
+    chars = m.content.length;
+    // 图片按固定 token 估值（≈1500 token/图，v1 视觉模型的常见计价量级），
+    // 不按 base64 字符数算——那会把 token 估算撑爆几个数量级
+    if (m.images !== undefined) chars += m.images.length * 5_250;
+  } else if (m.role === "assistant") {
+    chars = 0;
+    for (const c of m.content) {
+      if (c.type === "text") chars += c.text.length;
+      else if (c.type === "thinking") chars += c.thinking.length;
+      else chars += JSON.stringify(c.arguments).length + c.name.length;
+    }
+  } else {
+    chars = 0;
+    for (const c of m.content) chars += c.text.length;
+  }
+
+  messageCharsCache.set(m, chars);
+  return chars;
+}
+
 /** 粗略估算 token 数：中文按 1.5 字符/token，其余按 4 字符/token */
 export function estimateTokens(messages: AgentMessage[], systemPrompt: string): number {
   let chars = systemPrompt.length;
-  for (const m of messages) {
-    if (m.role === "user") chars += m.content.length;
-    else if (m.role === "assistant") {
-      for (const c of m.content) {
-        if (c.type === "text") chars += c.text.length;
-        else if (c.type === "thinking") chars += c.thinking.length;
-        else chars += JSON.stringify(c.arguments).length + c.name.length;
-      }
-    } else {
-      for (const c of m.content) chars += c.text.length;
-    }
-  }
+  for (const m of messages) chars += messageChars(m);
   return Math.ceil(chars / 3.5);
 }
 
-export function lastMessage(state: AgentState): AgentMessage | undefined {
-  // 优先用 ★ Current Node 上的消息；★ 缺失时取 messages 数组末位
-  const current = currentNode(state);
-  if (current !== undefined) return current.message;
-  return state.messages[state.messages.length - 1];
+// ------------------------------------------------------------ token 口径自校准
+
+/** EMA 平滑系数：新观测权重（观测抖动大，不全量采纳） */
+const CALIBRATE_ALPHA = 0.3;
+/** 合理比值上下界：超出视为异常 provider 口径，丢弃不污染 */
+const CHARS_PER_TOKEN_MIN = 1.5;
+const CHARS_PER_TOKEN_MAX = 8;
+
+/**
+ * 用真实用量反馈修正 chars/token 口径（Context 自校准）。
+ * 固定的 3.5 在「中文 + 代码 + JSON arguments」混合场景偏差可达 ±30%；
+ * 每次真实调用后，agent 把「发出去的字符量 ÷ usage.input」喂进来做 EMA，
+ * transformContext 的预算判断就从「猜」变成「量」。
+ * 分母用 usage.input（openai 口径 = prompt_tokens，已含缓存命中部分），不叠 cacheRead。
+ */
+export function calibrateCharsPerToken(
+  state: AgentState,
+  charsSent: number,
+  inputTokens: number,
+): void {
+  if (inputTokens <= 0 || charsSent <= 0) return;
+  const observed = charsSent / inputTokens;
+  if (!Number.isFinite(observed) || observed < CHARS_PER_TOKEN_MIN || observed > CHARS_PER_TOKEN_MAX) {
+    return;
+  }
+  const prior = state.observedCharsPerToken ?? observed;
+  state.observedCharsPerToken = prior * (1 - CALIBRATE_ALPHA) + observed * CALIBRATE_ALPHA;
 }
 
 export function totalUsage(state: AgentState): {
@@ -262,7 +375,9 @@ export function addNodeAt(
     if (parent !== undefined) parent.children.push(id);
   }
 
-  if (state.rootId === null) state.rootId = id;
+  // parent 为 null = 新 Root：compact 会在已有会话上建第二棵树的根，
+  // rootId 必须跟着切到当前活跃分支的根，否则就名不副实了
+  if (parentId === null || state.rootId === null) state.rootId = id;
 
   // ★ 推进到新节点（这是 AGENTS.md 表格里所有写场景的共同点）
   state.currentNodeId = id;

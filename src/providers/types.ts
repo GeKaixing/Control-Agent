@@ -45,11 +45,18 @@ export interface ToolResultContent {
   isError: boolean;
 }
 
+/** 用户消息里的图片块（data URL 形态，各适配器自行转成厂商格式） */
+export interface ImageBlock {
+  type: "image";
+  dataUrl: string;
+}
+
 export type LlmContent =
   | TextContent
   | ThinkingContent
   | ToolCallContent
-  | ToolResultContent;
+  | ToolResultContent
+  | ImageBlock;
 
 export type LlmRole = "user" | "assistant" | "toolResult";
 
@@ -67,6 +74,11 @@ export interface StreamOptions {
   thinkingLevel: ThinkingLevel;
   maxTokens?: number;
   signal?: AbortSignal;
+  /**
+   * 会话 id（同一会话内稳定、跨会话不同）。部分中继（如 opencode zen go）
+   * 要求请求带 x-opencode-session 头做路由/缓存优化，缺失时直接 400 拒绝。
+   */
+  sessionId?: string;
 }
 
 export interface ToolCallSummary {

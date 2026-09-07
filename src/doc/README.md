@@ -16,7 +16,7 @@ verbatimModuleSyntax）按职责切分成若干子模块，对外唯一入口是
 | [`agent/`](./agent/doc/README.md) | 唯一的调度状态机：外层 user 队列、内层 model↔tool 循环、事件流定义、并发与失败止损 | `agent.ts`、`convert.ts` |
 | [`context/`](./context/doc/README.md) | 模型真正看到的那份上下文：会话树、系统提示词、token 估算、消息入队、`transformContext` 三步后处理 | `state.ts`、`transform.ts`、`queue.ts`、`index.ts` |
 | [`providers/`](./providers/doc/README.md) | 模型适配器：把 OpenAI / Anthropic / mock 的流式协议收敛成同一个 `StreamFn` | `openai.ts`、`anthropic.ts`、`mock.ts`、`stream.ts`、`types.ts`、`index.ts` |
-| [`tools/`](./tools/doc/README.md) | 6 个内置工具（read / write / edit / bash / glob / grep）：注册表、参数校验、共享文件系统辅助 | `index.ts`、`types.ts`、`validate.ts`、`fs-utils.ts`、`*Tool.ts` |
+| [`tools/`](./tools/doc/README.md) | 7 个内置工具（read / write / edit / bash / glob / grep / memory）：注册表、参数校验、共享文件系统辅助、跨会话记忆 | `index.ts`、`types.ts`、`validate.ts`、`fs-utils.ts`、`*Tool.ts` |
 | [`ui/`](./ui/doc/README.md) | 终端交互：REPL 输入控制器、AgentEvent 着色渲染器、Markdown → ANSI、print 模式收敛 | `input.ts`、`renderer.ts`、`markdown.ts`、`print.ts` |
 
 ## 数据流总图
@@ -30,7 +30,7 @@ graph TD
   Print --> Agent
   Index --> Agent[agent/agent.ts<br/>外层 user · 内层 model↔tool]
   Agent -->|stream 调用| Providers[providers/*<br/>openai / anthropic / mock]
-  Agent -->|tool 调用| Tools[tools/_registry<br/>read·write·edit·bash·glob·grep]
+  Agent -->|tool 调用| Tools[tools/_registry<br/>read·write·edit·bash·glob·grep·memory]
   Agent -->|AgentEvent| Renderer[ui/renderer.ts<br/>终端着色输出]
   Agent -->|notice/done/error| Index
   Agent -->|读写 state / transform| Context[context/*<br/>会话树 + transform]

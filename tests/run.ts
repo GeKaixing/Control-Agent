@@ -1,33 +1,54 @@
 /**
- * 零依赖测试运行器：node --import tsx tests/run.ts
- * 覆盖工具、上下文变换、格式转换，以及一条完整的端到端链路。
+ * 零依赖测试运行器：npx tsx tests/run.ts
+ *
+ * 用例分三块，本文件是核心单元 / 端到端测试：
+ * 1. `tests/run.ts`（本文件）—— 工具、上下文、状态树、消息流转、print 收敛、markdown 渲染
+ * 2. `tests/cli-print.ts` —— 子进程级 CLI 测试，spawn 真 c-agent 跑 print 模式
+ * 3. `tests/repl-loop.ts` —— in-process REPL 测试，把 src/ui/repl.ts 的循环用 FakeInput 驱动
+ *
+ * 子用例文件通过 registry.register 注册用例，main() 顺序执行。本文件保留最厚的
+ * 那部分——它直接 import 内部模块测单元/集成，比 spawn 子进程快几倍。
  */
 
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
+import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
 
-import { Agent, type AgentEvent } from "../src/agent/agent.js";
+import { Agent, isContextOverflowError, type AgentEvent } from "../src/agent/agent.js";
 import {
   activeBranch,
   addNodeAt,
   appendNode,
+  calibrateCharsPerToken,
   createInitialState,
   currentNode,
+  messageChars,
+  latestSessionId,
+  listSessions,
+  loadSessionInto,
+  maxContextTokensFor,
   pathToRoot,
+  saveSession,
+  sessionFileExists,
+  sessionsDir,
+  shouldAutoCompact,
   switchTo,
   transformContext,
 } from "../src/context/index.js";
 import { convertToLlm } from "../src/agent/convert.js";
 import { createMockStream } from "../src/providers/mock.js";
-import type { StreamFn, StreamOptions } from "../src/providers/types.js";
+import { lookupContextWindow, parseModelSpec, resolveModel } from "../src/providers/index.js";
+import type { StreamEvent, StreamFn, StreamOptions } from "../src/providers/types.js";
 import { allTools, bashTool, editTool, globTool, grepTool, readTool, resolveShell, writeTool, type ToolName } from "../src/tools/index.js";
 import type { Tool } from "../src/tools/types.js";
 import { ok } from "../src/tools/types.js";
 import { globToRegExp, matchesGlob } from "../src/tools/glob-matcher.js";
 import { validateParams } from "../src/tools/validate.js";
-import { buildSeedMessages, DEFAULT_PREFILL_COMMIT } from "../src/session.js";
+import { buildSeedMessages, readGitSnapshot, DEFAULT_PREFILL_COMMIT } from "../src/session.js";
+import { buildApprovalDetail } from "../desktop/main/approval-diff.js";
 import { createPrintOutput } from "../src/ui/print.js";
 import { createMarkdownStream, renderMarkdown } from "../src/ui/markdown.js";
 import type {
@@ -38,15 +59,17 @@ import type {
 } from "../src/types.js";
 import { emptyUsage } from "../src/types.js";
 
-interface Case {
-  name: string;
-  fn: () => Promise<void> | void;
-}
-
-const cases: Case[] = [];
-function test(name: string, fn: () => Promise<void> | void): void {
-  cases.push({ name, fn });
-}
+import { test } from "./registry.js";
+// 加载子用例文件：import 时它们就调 test() 把自己注册进 registry。
+// 这一段就是子用例的唯一接线点；加新分类的子文件时，加一行 import 就够了。
+import "./cli-print.js";
+import "./repl-loop.js";
+import "./pillars.js";
+import "./provider-mock.js";
+import "./display-connector.js";
+import "./ws-bridge.js";
+import "./bot-runner.js";
+import "./bot-weixin.js";
 
 const noSignal = (): AbortSignal => new AbortController().signal;
 
@@ -323,6 +346,571 @@ test("transformContext: 清理孤儿工具结果并按预算裁剪", () => {
   assert.ok(ctx.messages.length < messages.length);
 });
 
+test("transformContext: 迟滞裁剪——总量落在迟滞带内不裁，超触发线一次裁到目标线", () => {
+  const makeState = () => {
+    const state = createInitialState({
+      cwd: process.cwd(),
+      model: { provider: "mock", id: "mock-1" },
+      tools: allTools,
+    });
+    for (let i = 0; i < 3; i++) {
+      appendNode(state, { role: "user", content: "x".repeat(3000), timestamp: 0 });
+      appendNode(state, {
+        role: "assistant",
+        content: [{ type: "text", text: "y".repeat(3000) }],
+        model: "m",
+        stopReason: "stop",
+        usage: emptyUsage(),
+        timestamp: 0,
+      });
+    }
+    return state;
+  };
+
+  // 迟滞带内的预算线：maxContextTokens 使 0.7B < total < 0.85B → 不应裁剪
+  const bandState = makeState();
+  const bandTotal =
+    bandState.systemPrompt.length +
+    bandState.messages.reduce((n, m) => n + messageChars(m), 0);
+  const bandOptions = {
+    reservedTokens: 0,
+    keepRecentTurns: 1,
+    maxToolResultChars: 4000,
+    trimTriggerRatio: 0.85,
+    trimTargetRatio: 0.7,
+  };
+  const bandCtx = transformContext(bandState, {
+    ...bandOptions,
+    maxContextTokens: Math.ceil(bandTotal / 0.8 / 3.5), // total = 0.8 × 预算
+  });
+  assert.equal(
+    bandCtx.droppedMessages,
+    0,
+    "总量落在迟滞带（70%~85%）内不应裁剪——保住前缀缓存",
+  );
+
+  // 超触发线：total ≈ 0.95 × 预算（> 0.85 触发线）→ 触发裁剪；
+  // 目标线 = 0.7 × 预算 ≈ 0.735 × total，丢一轮后应降到目标线以下即收手
+  const overState = makeState();
+  const overCtx = transformContext(overState, {
+    ...bandOptions,
+    maxContextTokens: Math.ceil(bandTotal / 1.05 / 3.5),
+  });
+  assert.ok(overCtx.droppedMessages > 0, "超触发线应当裁剪");
+  const overTotal =
+    overCtx.systemPrompt.length +
+    overCtx.messages.reduce((n, m) => n + messageChars(m), 0);
+  const target = (bandTotal / 1.05) * 0.7;
+  assert.ok(
+    overTotal <= target,
+    "裁剪应一次降到目标线以下，而不是裁到刚好贴线",
+  );
+  assert.ok(
+    overCtx.messages[overCtx.messages.length - 1]?.role === "assistant",
+    "最后一轮必须保住",
+  );
+});
+
+test("transformContext: 旧轮超长成功工具结果替换成指针，error 结果仍截断", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  const long = "z".repeat(2000);
+  // 第 1 轮：一个超长成功结果 + 一个超长 error 结果；后面垫两轮把第 1 轮推进旧区
+  appendNode(state, { role: "user", content: "t1", timestamp: 0 });
+  appendNode(state, {
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "a1", name: "read", arguments: { path: "x.ts" } },
+      { type: "toolCall", id: "a2", name: "bash", arguments: { command: "ls" } },
+    ],
+    model: "m",
+    stopReason: "toolUse",
+    usage: emptyUsage(),
+    timestamp: 0,
+  });
+  appendNode(state, { role: "toolResult", toolCallId: "a1", toolName: "read", content: [{ type: "text", text: long }], isError: false, timestamp: 0 });
+  appendNode(state, { role: "toolResult", toolCallId: "a2", toolName: "bash", content: [{ type: "text", text: long }], isError: true, timestamp: 0 });
+  for (let i = 0; i < 2; i++) {
+    appendNode(state, { role: "user", content: `t${i + 2}`, timestamp: 0 });
+    appendNode(state, {
+      role: "assistant",
+      content: [{ type: "text", text: "ok" }],
+      model: "m",
+      stopReason: "stop",
+      usage: emptyUsage(),
+      timestamp: 0,
+    });
+  }
+
+  const ctx = transformContext(state, {
+    maxContextTokens: 1_000_000, // 预算给足，只测压缩不测裁剪
+    reservedTokens: 8_000,
+    keepRecentTurns: 2,
+    maxToolResultChars: 500,
+    trimTriggerRatio: 0.85,
+    trimTargetRatio: 0.7,
+  });
+
+  const success = ctx.messages.find(
+    (m) => m.role === "toolResult" && m.toolCallId === "a1",
+  );
+  assert.ok(success && success.role === "toolResult");
+  const successText = success.content.map((c) => c.text).join("");
+  assert.match(successText, /工具结果已省略/);
+  assert.match(successText, /read/);
+  assert.match(successText, /2000 字符/);
+  assert.ok(successText.length < 120, "占位指针应远短于原结果");
+
+  const err = ctx.messages.find(
+    (m) => m.role === "toolResult" && m.toolCallId === "a2",
+  );
+  assert.ok(err && err.role === "toolResult");
+  const errText = err.content.map((c) => c.text).join("");
+  assert.doesNotMatch(errText, /工具结果已省略/, "error 结果不替换成指针");
+  assert.ok(errText.length <= 600, "error 结果仍走头尾截断");
+
+  assert.equal(ctx.prunedToolResults, 2, "两条超长结果都计入 prunedToolResults");
+});
+
+test("context: calibrateCharsPerToken 用真实 usage 修正 chars/token 口径", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  assert.equal(state.observedCharsPerToken, undefined);
+
+  calibrateCharsPerToken(state, 4200, 1000); // 观测 4.2，首次直接采纳
+  assert.ok(Math.abs((state.observedCharsPerToken ?? 0) - 4.2) < 1e-9);
+
+  calibrateCharsPerToken(state, 3000, 1000); // 观测 3.0，EMA 往下拉
+  const after = state.observedCharsPerToken ?? 0;
+  assert.ok(after < 4.2 && after > 3.0, "EMA 应介于新旧观测之间");
+
+  const before = state.observedCharsPerToken;
+  calibrateCharsPerToken(state, 100, 1000); // 0.1 < 下界，异常观测丢弃
+  calibrateCharsPerToken(state, 0, 1000); // 无效输入 no-op
+  calibrateCharsPerToken(state, 1000, 0);
+  assert.equal(state.observedCharsPerToken, before, "异常观测不污染口径");
+});
+
+test("context: isContextOverflowError 识别各家长度超限报错，不误判普通错误", () => {
+  assert.equal(isContextOverflowError(undefined), false);
+  assert.equal(isContextOverflowError(""), false);
+  assert.equal(
+    isContextOverflowError("Error: This model's maximum context length is 8192 tokens"),
+    true,
+    "openai 口径",
+  );
+  assert.equal(isContextOverflowError("prompt is too long: 250000 tokens > 200000 maximum"), true, "anthropic 口径");
+  assert.equal(isContextOverflowError("context_length_exceeded"), true, "openai 错误码");
+  assert.equal(
+    isContextOverflowError(
+      "400 The input token count (250000) exceeds the maximum number of tokens allowed (200000).",
+    ),
+    true,
+    "gemini 口径",
+  );
+  assert.equal(isContextOverflowError("连接超时"), false, "普通错误不误判");
+  assert.equal(isContextOverflowError("工具参数校验失败"), false);
+});
+
+test("context: 模型报上下文超限 → 按 60% 预算重裁重试一次（失败驱动降档）", async () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  // 4 个大轮次 + 待处理的 user 消息：全量 ≈ 20k 字符
+  for (let i = 0; i < 4; i++) {
+    appendNode(state, { role: "user", content: "x".repeat(2500), timestamp: 0 });
+    appendNode(state, {
+      role: "assistant",
+      content: [{ type: "text", text: "y".repeat(2500) }],
+      model: "m",
+      stopReason: "stop",
+      usage: emptyUsage(),
+      timestamp: 0,
+    });
+  }
+
+  let calls = 0;
+  const callSizes: number[] = [];
+  const stream: StreamFn = async function* (options) {
+    calls += 1;
+    callSizes.push(options.messages.length);
+    if (calls === 1) {
+      const overflow: AssistantMessage = {
+        role: "assistant",
+        content: [],
+        model: "mock:mock-1",
+        stopReason: "error",
+        errorMessage: "Error: This model's maximum context length is 8192 tokens",
+        usage: emptyUsage(),
+        timestamp: 0,
+      };
+      yield { type: "error", reason: "error", error: overflow };
+      return;
+    }
+    yield { type: "done", reason: "stop", message: textOnly("完成") };
+  };
+
+  const events: AgentEvent[] = [];
+  const agent = new Agent({
+    state,
+    stream,
+    onEvent: (e) => {
+      events.push(e);
+    },
+    maxStreamRetries: 0, // 关掉朴素重试，隔离出降档重试的信号
+    autoCompact: false, // 关掉自动压缩，隔离出降档重试的信号（否则会先走摘要路径）
+    transform: { maxContextTokens: 7000, reservedTokens: 100 },
+  });
+  agent.enqueueUser("继续");
+  await agent.run();
+
+  assert.equal(calls, 2, "应恰好调用两次模型（超限一次 + 降档后一次）");
+  assert.ok(callSizes[0] !== undefined && callSizes[1] !== undefined);
+  assert.ok(
+    (callSizes[1] ?? 0) < (callSizes[0] ?? 0),
+    `降档后送出的消息应更少（${callSizes[0]} → ${callSizes[1]}）`,
+  );
+  const notices = events.filter((e) => e.type === "notice");
+  assert.ok(
+    notices.some((e) => e.type === "notice" && /上下文超限/.test(e.message)),
+    "降档应发 notice 告知",
+  );
+  const last = state.messages[state.messages.length - 1];
+  assert.ok(last?.role === "assistant" && state.messages.some((m) => m.role === "assistant" && m.content[0]?.type === "text" && m.content[0].text === "完成"));
+});
+
+test("context: Agent.compact 把历史摘要写回会话树新 Root，旧分支保留", async () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  appendNode(state, { role: "user", content: "帮我改 a.ts", timestamp: 0 });
+  appendNode(state, {
+    role: "assistant",
+    content: [{ type: "text", text: "已修改" }],
+    model: "m",
+    stopReason: "stop",
+    usage: emptyUsage(),
+    timestamp: 0,
+  });
+  const oldRootId = state.rootId;
+  const oldNodeCount = state.nodes.size;
+
+  let compactCallMessages: ReturnType<typeof convertToLlm> = [];
+  const stream: StreamFn = async function* (options) {
+    compactCallMessages = options.messages;
+    yield { type: "done", reason: "stop", message: textOnly("用户要求改 a.ts，已完成") };
+  };
+  const agent = new Agent({ state, stream });
+
+  const done = await agent.compact();
+  assert.equal(done, true);
+  const llmText = (m: (typeof compactCallMessages)[number] | undefined): string => {
+    const c = m?.content;
+    if (typeof c === "string") return c;
+    return (c ?? [])
+      .map((p) => ("text" in p ? p.text : ""))
+      .join("");
+  };
+  assert.match(
+    llmText(compactCallMessages[compactCallMessages.length - 1]),
+    /压缩成一份摘要/,
+    "摘要指令应作为最后一条 user 消息发出",
+  );
+  assert.ok((compactCallMessages.length ?? 0) >= 2, "摘要请求应携带完整历史");
+
+  assert.equal(state.messages.length, 1, "压缩后线性视图只剩摘要一条");
+  const compactRoot = state.messages[0];
+  assert.ok(compactRoot?.role === "user");
+  assert.match(compactRoot.content, /前文对话摘要/);
+  assert.match(compactRoot.content, /改 a\.ts/, "摘要正文应在新 Root 消息里");
+  assert.notEqual(state.rootId, oldRootId, "应建立新 Root");
+  assert.equal(state.nodes.size, oldNodeCount + 1, "旧分支节点保留在树中");
+  assert.equal(state.currentNodeId, state.rootId, "★ 推进到摘要节点");
+
+  // 压缩失败路径：模型报错 → 状态原样不动。
+  // maxStreamRetries: 0——失败重试的退避 sleep 是 unref 定时器，裸测试里
+  // 事件循环空了进程会直接退出（生产环境 REPL/Electron 有句柄保活，不受影响）。
+  const before = { rootId: state.rootId, count: state.nodes.size, messages: state.messages.length };
+  const failAgent = new Agent({
+    state,
+    stream: async function* () {
+      yield {
+        type: "error",
+        reason: "error",
+        error: { ...textOnly(""), stopReason: "error" as const, errorMessage: "boom" },
+      };
+    },
+    maxStreamRetries: 0,
+  });
+  assert.equal(await failAgent.compact(), false);
+  assert.equal(state.rootId, before.rootId);
+  assert.equal(state.nodes.size, before.count);
+  assert.equal(state.messages.length, before.messages);
+});
+
+// ----------------------------------------------------------------- 自动 compact
+
+test("context: shouldAutoCompact 按迟滞触发线判定，观测口径参与计算", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  const opts = { maxContextTokens: 7000, reservedTokens: 100 };
+  assert.equal(shouldAutoCompact(state, opts), false, "空状态不触发");
+
+  // 预算 6900 × 3.5 = 24150 chars，触发线 0.85 ≈ 20527 chars
+  appendNode(state, { role: "user", content: "a".repeat(20_000), timestamp: 0 });
+  appendNode(state, {
+    role: "assistant",
+    content: [{ type: "text", text: "b".repeat(2_000) }],
+    model: "m",
+    stopReason: "stop",
+    usage: emptyUsage(),
+    timestamp: 0,
+  });
+  const sysPrompt = state.systemPrompt.length;
+  assert.ok(sysPrompt + 22_000 > 24_150 * 0.85, "前置：系统提示词不够小，否则用例无意义");
+  assert.equal(shouldAutoCompact(state, opts), true, "越过触发线应触发");
+
+  // 观测口径参与判定：观测 chars/token = 7（偏大）→ 预算字符量翻倍 → 不触发
+  state.observedCharsPerToken = 7;
+  assert.equal(shouldAutoCompact(state, opts), false, "观测口径偏大时触发线右移");
+});
+
+test("context: maxContextTokensFor 由模型窗口推导裁剪预算", () => {
+  assert.equal(maxContextTokensFor(128_000), 115_200, "0.9 系数留估算误差余量");
+  assert.equal(maxContextTokensFor(1_000_000), 900_000, "1M 窗口模型不再被写死的 120k 卡住");
+  assert.equal(maxContextTokensFor(32_000), 28_800, "小窗口模型提前按小预算裁剪");
+  assert.equal(maxContextTokensFor(4_096), 16_000, "下限保护：预算不为负（reservedTokens × 2）");
+  assert.equal(maxContextTokensFor(17_777), 16_000, "恰在下限附近时取下限");
+});
+
+test("providers: lookupContextWindow 粗表命中与兜底", () => {
+  assert.equal(lookupContextWindow("claude-3-5-sonnet-20241022"), 200_000);
+  assert.equal(lookupContextWindow("gemini-1.5-pro"), 1_000_000);
+  assert.equal(lookupContextWindow("mimo-v2.5"), 1_000_000, "MiMo 官方 1M（元数据缺失端点靠粗表兜底）");
+  assert.equal(lookupContextWindow("deepseek-chat"), 128_000);
+  assert.equal(lookupContextWindow("kimi-k2-0905-preview"), 256_000);
+  assert.equal(lookupContextWindow("mock-1"), 32_000);
+  assert.equal(lookupContextWindow("totally-unknown-model"), 1_000_000, "用户定调：未知模型 1M 兜底（误判大只浪费余量，误判小白丢历史）");
+});
+
+test("providers: resolveModel 统一填充 contextWindow（显式值不覆盖）", () => {
+  const filled = resolveModel({ provider: "mock", id: "mock-1" });
+  assert.equal(filled.model.contextWindow, 32_000, "缺省按粗表填充");
+  const kept = resolveModel({ provider: "mock", id: "mock-1", contextWindow: 555_000 });
+  assert.equal(kept.model.contextWindow, 555_000, "调用方显式给的值优先");
+});
+
+test("context: 上下文越线自动 compact，抢在机械裁剪之前", async () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  // 5 个大轮次 ≈ 30k chars，远超触发线 ≈ 20.5k
+  for (let i = 0; i < 5; i++) {
+    appendNode(state, { role: "user", content: "x".repeat(3000), timestamp: 0 });
+    appendNode(state, {
+      role: "assistant",
+      content: [{ type: "text", text: "y".repeat(3000) }],
+      model: "m",
+      stopReason: "stop",
+      usage: emptyUsage(),
+      timestamp: 0,
+    });
+  }
+  const oldNodeCount = state.nodes.size;
+
+  let calls = 0;
+  const prompts: string[] = [];
+  const llmText = (m: { content: unknown } | undefined): string => {
+    const c = m?.content;
+    if (typeof c === "string") return c;
+    return ((c ?? []) as { text?: string }[]).map((p) => p.text ?? "").join("");
+  };
+  const stream: StreamFn = async function* (options) {
+    calls += 1;
+    prompts.push(llmText(options.messages[options.messages.length - 1]));
+    if (calls === 1) {
+      yield { type: "done", reason: "stop", message: textOnly("摘要：用户要改 a.ts，已完成") };
+      return;
+    }
+    yield { type: "done", reason: "stop", message: textOnly("完成") };
+  };
+
+  const events: AgentEvent[] = [];
+  const agent = new Agent({
+    state,
+    stream,
+    onEvent: (e) => {
+      events.push(e);
+    },
+    maxStreamRetries: 0,
+    transform: { maxContextTokens: 7000, reservedTokens: 100 },
+  });
+  agent.enqueueUser("继续");
+  await agent.run();
+
+  assert.equal(calls, 2, "应恰好两次模型调用（摘要一次 + 正常回答一次）");
+  assert.match(prompts[0] ?? "", /压缩成一份摘要/, "第一次调用应是摘要请求");
+  assert.ok(events.some((e) => e.type === "context_compact"), "应发出 context_compact 事件");
+  assert.ok(
+    !events.some((e) => e.type === "context_pruned"),
+    "compact 抢在机械裁剪之前，不应有丢轮次",
+  );
+  assert.ok(
+    events.some((e) => e.type === "notice" && /上下文超限/.test(e.message)) === false,
+    "不应走到超限降档",
+  );
+  // 压缩后第二次调用只看得到摘要
+  assert.equal(state.messages.length, 2, "线性视图 = 摘要 + 最终回答");
+  assert.ok(state.messages[0]?.role === "user");
+  assert.match(state.messages[0]?.content ?? "", /前文对话摘要/);
+  assert.equal(state.nodes.size, oldNodeCount + 3, "旧分支保留；新增继续/摘要/回答三个节点");
+});
+
+test("context: 无显式 transform 时 Agent 按模型 contextWindow 推导预算（CLI 路径）", async () => {
+  const makeState = (contextWindow?: number) =>
+    createInitialState({
+      cwd: process.cwd(),
+      model: contextWindow === undefined
+        ? { provider: "mock", id: "mock-1" }
+        : { provider: "mock", id: "mock-1", contextWindow },
+      tools: allTools,
+    });
+
+  // 6 个大轮次 ≈ 36k chars。小窗口（20k → 预算 18k tokens → 触发线 ≈ 29.7k chars）应触发自动 compact；
+  // 无窗口标注（默认 120k 预算）同样的内容远够不着触发线——两条路径唯一差别就是 ModelRef.contextWindow。
+  const seed = (state: ReturnType<typeof makeState>): void => {
+    for (let i = 0; i < 6; i++) {
+      appendNode(state, { role: "user", content: "x".repeat(3000), timestamp: 0 });
+      appendNode(state, {
+        role: "assistant",
+        content: [{ type: "text", text: "y".repeat(3000) }],
+        model: "m",
+        stopReason: "stop",
+        usage: emptyUsage(),
+        timestamp: 0,
+      });
+    }
+  };
+
+  const mkAgent = (state: ReturnType<typeof makeState>) => {
+    let calls = 0;
+    const stream: StreamFn = async function* () {
+      calls += 1;
+      if (calls === 1) {
+        yield { type: "done", reason: "stop", message: textOnly("摘要：用户要改 a.ts，已完成") };
+        return;
+      }
+      yield { type: "done", reason: "stop", message: textOnly("完成") };
+    };
+    const agent = new Agent({ state, stream, onEvent: () => {}, maxStreamRetries: 0 });
+    return { agent, getCalls: () => calls };
+  };
+
+  // 小窗口：预算随窗口收缩 → 自动 compact 抢先
+  const small = makeState(20_000);
+  seed(small);
+  const a1 = mkAgent(small);
+  a1.agent.enqueueUser("继续");
+  await a1.agent.run();
+  assert.equal(a1.getCalls(), 2, "小窗口模型应触发自动 compact（摘要 + 回答两次调用）");
+
+  // 无标注：默认 120k 预算，同样内容不触发
+  const plain = makeState();
+  seed(plain);
+  const a2 = mkAgent(plain);
+  a2.agent.enqueueUser("继续");
+  await a2.agent.run();
+  assert.equal(a2.getCalls(), 1, "默认预算下同样的内容够不着触发线");
+});
+
+test("context: 自动 compact 失败 → 本次 run 停用并落回机械裁剪", async () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  for (let i = 0; i < 5; i++) {
+    appendNode(state, { role: "user", content: "x".repeat(3000), timestamp: 0 });
+    appendNode(state, {
+      role: "assistant",
+      content: [{ type: "text", text: "y".repeat(3000) }],
+      model: "m",
+      stopReason: "stop",
+      usage: emptyUsage(),
+      timestamp: 0,
+    });
+  }
+
+  let calls = 0;
+  const prompts: string[] = [];
+  const llmText = (m: { content: unknown } | undefined): string => {
+    const c = m?.content;
+    if (typeof c === "string") return c;
+    return ((c ?? []) as { text?: string }[]).map((p) => p.text ?? "").join("");
+  };
+  const stream: StreamFn = async function* (options) {
+    calls += 1;
+    prompts.push(llmText(options.messages[options.messages.length - 1]));
+    if (calls === 1) {
+      yield {
+        type: "error",
+        reason: "error",
+        error: { ...textOnly(""), stopReason: "error" as const, errorMessage: "boom" },
+      };
+      return;
+    }
+    yield { type: "done", reason: "stop", message: textOnly("完成") };
+  };
+
+  const events: AgentEvent[] = [];
+  const agent = new Agent({
+    state,
+    stream,
+    onEvent: (e) => {
+      events.push(e);
+    },
+    maxStreamRetries: 0, // 失败重试的退避是 unref 定时器，裸测试里会提前退出进程
+    transform: { maxContextTokens: 7000, reservedTokens: 100 },
+  });
+  agent.enqueueUser("继续");
+  await agent.run();
+
+  assert.equal(calls, 2, "摘要失败只尝试一次，之后正常回答");
+  assert.equal(
+    prompts.filter((p) => /压缩成一份摘要/.test(p)).length,
+    1,
+    "本次 run 内不应重试摘要",
+  );
+  assert.ok(
+    events.some((e) => e.type === "notice" && /自动压缩未成功/.test(e.message)),
+    "失败应发 notice 告知",
+  );
+  assert.ok(events.some((e) => e.type === "context_pruned"), "机械裁剪兜底生效");
+  assert.ok(!events.some((e) => e.type === "context_compact"), "失败路径不应发出压缩事件");
+  const last = state.messages[state.messages.length - 1];
+  assert.ok(
+    last?.role === "assistant" &&
+      state.messages.some(
+        (m) => m.role === "assistant" && m.content[0]?.type === "text" && m.content[0].text === "完成",
+      ),
+  );
+});
+
 // ----------------------------------------------------------------- 树状
 
 test("tree: appendNode 推进 ★ Current Node 且 messages 同步", () => {
@@ -440,6 +1028,113 @@ test("prompts: createInitialState 不传 append 时与原行为一致", () => {
   // 没传 append 时 systemPrompt 就是 buildSystemPrompt 默认值
   assert.ok(state.systemPrompt.includes("你是一个在终端里工作的编码代理。"));
   assert.ok(!state.systemPrompt.includes("# 追加指令"));
+});
+
+test("prompts: 默认系统提示词要求闲聊/打招呼不调用工具", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  assert.ok(state.systemPrompt.includes("直接用文字回答，一个工具都不要调用"));
+  // 全量工具下，grep/glob 在场 → 用定位式规则，不再写通用兜底句
+  assert.ok(state.systemPrompt.includes("查找优先用 grep / glob 定位"));
+  assert.ok(!state.systemPrompt.includes("只有任务涉及读代码、查文件、改文件或跑命令时才动手"));
+});
+
+test("prompts: guidelines 按工具集动态生成（学 pi）", () => {
+  const makePrompt = (toolNames: string[]) =>
+    createInitialState({
+      cwd: process.cwd(),
+      model: { provider: "mock", id: "mock-1" },
+      tools: allTools.filter((t) => toolNames.includes(t.name)),
+    }).systemPrompt;
+
+  // 只有 bash：不出现 grep/glob 与 edit/write 规则，bash 规则在
+  const bashOnly = makePrompt(["bash"]);
+  assert.ok(bashOnly.includes("只有任务涉及读代码、查文件、改文件或跑命令时才动手"));
+  assert.ok(bashOnly.includes("运行命令用 bash"));
+  assert.ok(!bashOnly.includes("grep / glob"));
+  assert.ok(!bashOnly.includes("edit 做精确替换"));
+
+  // 没有 bash：bash 规则消失
+  const noBash = makePrompt(["read", "edit", "write"]);
+  assert.ok(!noBash.includes("运行命令用 bash"));
+  assert.ok(noBash.includes("edit 做精确替换"));
+
+  // 工具全缺：只剩恒定规则，可用工具列表为空
+  const none = makePrompt([]);
+  assert.ok(none.includes("直接用文字回答，一个工具都不要调用"));
+  assert.ok(none.includes("可用工具：") && none.endsWith("可用工具："));
+});
+
+test("prompts: maturity strong 时纪律规则消失，budget/缺省保留（设计哲学）", () => {
+  const makePrompt = (maturity?: "strong" | "budget") =>
+    createInitialState({
+      cwd: process.cwd(),
+      model: { provider: "mock", id: "mock-1", maturity },
+      tools: allTools,
+    }).systemPrompt;
+
+  // 缺省 = budget：纪律规则在
+  assert.ok(makePrompt(undefined).includes("直接用文字回答，一个工具都不要调用"));
+  assert.ok(makePrompt("budget").includes("直接用文字回答，一个工具都不要调用"));
+
+  // strong：闲聊规则与兜底句都消失，工具条件规则（效率/偏好类）保留
+  const strong = makePrompt("strong");
+  assert.ok(!strong.includes("直接用文字回答，一个工具都不要调用"));
+  assert.ok(!strong.includes("只有任务涉及读代码、查文件、改文件或跑命令时才动手"));
+  assert.ok(strong.includes("查找优先用 grep / glob 定位"));
+  assert.ok(strong.includes("edit 做精确替换"));
+  assert.ok(strong.includes("运行命令用 bash"));
+});
+
+test("providers: parseModelSpec 支持末段 :strong/:budget 档位", () => {
+  const strong = parseModelSpec("openai:gpt-5.2:strong");
+  assert.equal(strong.id, "gpt-5.2");
+  assert.equal(strong.maturity, "strong");
+  const budget = parseModelSpec("mock:mock-1:budget");
+  assert.equal(budget.id, "mock-1");
+  assert.equal(budget.maturity, "budget");
+  // 非档位末段仍当作 id 一部分
+  const plain = parseModelSpec("openai:gpt-4o-mini");
+  assert.equal(plain.id, "gpt-4o-mini");
+  assert.equal(plain.maturity, undefined);
+});
+
+test("providers: parseModelSpec 识别厂商预设（baseUrl / key env / 别名 / 无 key 端点）", () => {
+  const saved = process.env["DEEPSEEK_API_KEY"];
+  try {
+    // 有 key：厂商前缀 → 对应 provider + 默认 baseUrl + key env
+    process.env["DEEPSEEK_API_KEY"] = "sk-test";
+    const ds = parseModelSpec("deepseek:deepseek-chat");
+    assert.equal(ds.provider, "deepseek");
+    assert.equal(ds.id, "deepseek-chat");
+    assert.equal(ds.baseUrl, "https://api.deepseek.com/v1");
+    assert.equal(ds.apiKey, "sk-test");
+
+    // 只写前缀：回退厂商默认模型（别名 kimi → moonshot）
+    const bare = parseModelSpec("kimi:");
+    assert.equal(bare.provider, "moonshot");
+    assert.equal(bare.id, "kimi-k2-0905-preview");
+
+    // ollama 本地端点：无需 key，填占位 key 不降级
+    const local = parseModelSpec("ollama:qwen3");
+    assert.equal(local.provider, "ollama");
+    assert.equal(local.baseUrl, "http://localhost:11434/v1");
+    assert.ok((local.apiKey ?? "").length > 0);
+    const resolvedLocal = resolveModel(local);
+    assert.equal(resolvedLocal.degraded, undefined);
+
+    // 缺 key：stream 换成 mock，ModelRef 保留原样（providers/doc/README.md 约定），提示里带正确的 env 名
+    delete process.env["DEEPSEEK_API_KEY"];
+    const degraded = resolveModel(parseModelSpec("deepseek:deepseek-chat"));
+    assert.equal(degraded.model.provider, "deepseek");
+    assert.ok(degraded.degraded?.includes("DEEPSEEK_API_KEY"));
+  } finally {
+    if (saved !== undefined) process.env["DEEPSEEK_API_KEY"] = saved;
+    else delete process.env["DEEPSEEK_API_KEY"];
+  }
 });
 
 test("prompts: appendSystemPrompt 会在默认系统提示词后追加 # 追加指令 段", () => {
@@ -667,7 +1362,9 @@ async function runAgent(options: {
   const agent = new Agent({
     state,
     stream: options.stream ?? createMockStream({ delayMs: 0 }),
-    onEvent: (e) => events.push(e),
+    onEvent: (e) => {
+      events.push(e);
+    },
     ...extra,
   });
 
@@ -809,6 +1506,111 @@ test("串行 / 并行：只读工具可并行，开关可强制串行", async ()
   assert.ok(
     serial.durationMs >= 480,
     `串行执行应慢于 480ms，实际 ${serial.durationMs}ms`,
+  );
+});
+
+test("端到端：串行工具间隙的中途插话会打断剩余调用（pi 式 steering）", async () => {
+  const dir = await tempDir();
+  const model: ModelRef = { provider: "mock", id: "mock-1" };
+  const slowTool: Tool = {
+    name: "slow",
+    description: "执行期间插话的 mutating 工具（强制串行，制造工具间隙）",
+    parameters: {
+      type: "object",
+      properties: { tag: { type: "string" } },
+      required: ["tag"],
+    },
+    isMutating: true,
+    async execute(args, _ctx) {
+      void _ctx;
+      // 第一个工具执行期间用户插话：剩余调用应被跳过
+      if (args["tag"] === "a") agent.steer("改方向");
+      return ok(`slow:${String(args["tag"])}`);
+    },
+  };
+  const state = createInitialState({ cwd: dir, model, tools: [slowTool] });
+  const events: AgentEvent[] = [];
+
+  const toolCall = (id: string, tag: string): ToolCallContent => ({
+    type: "toolCall",
+    id,
+    name: "slow",
+    arguments: { tag },
+  });
+  const assistantWith = (calls: ToolCallContent[]): AssistantMessage => ({
+    role: "assistant",
+    content: calls,
+    model: "mock:mock-1",
+    stopReason: "toolUse",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    timestamp: Date.now(),
+  });
+
+  let round = 0;
+  const stream: StreamFn = async function* (_options: StreamOptions) {
+    void _options;
+    round += 1;
+    if (round > 1) {
+      yield { type: "done", reason: "stop", message: textOnly("已按新指令调整") };
+      return;
+    }
+    const c1 = toolCall("c1", "a");
+    const c2 = toolCall("c2", "b");
+    const partial = assistantWith([c1, c2]);
+    yield { type: "toolcall_end", toolCall: c1, partial };
+    yield { type: "toolcall_end", toolCall: c2, partial };
+    yield { type: "done", reason: "toolUse", message: partial };
+  };
+
+  const agent = new Agent({
+    state,
+    stream,
+    onEvent: (e) => {
+      events.push(e);
+    },
+  });
+  agent.enqueueUser("做两件事");
+  await agent.run();
+
+  // 事件：c1 正常结束，c2 被跳过（isError 但带「已跳过」标记）
+  const toolEnds = events.filter((e) => e.type === "tool_end");
+  assert.equal(toolEnds.length, 2, "c1 执行 + c2 跳过，共两次 tool_end");
+  const second = toolEnds[1];
+  assert.ok(second?.type === "tool_end" && second.result.isError);
+  assert.match(second.result.content[0]?.text ?? "", /已跳过/);
+
+  // 事件：steering 在下一轮顶部广播（注入仍由内层循环统一做）
+  assert.ok(events.some((e) => e.type === "steering" && e.texts[0] === "改方向"));
+
+  // 消息顺序：assistant(toolCalls) → toolResult(c1) → toolResult(c2 跳过) → user(steering)
+  // 这个顺序不能破——toolResult 必须紧跟带 toolCalls 的 assistant，否则真实端点会拒绝
+  const msgs = state.messages;
+  const assistantIdx = msgs.findIndex((m) => m.role === "assistant");
+  const c1Idx = msgs.findIndex((m) => m.role === "toolResult" && m.toolCallId === "c1");
+  const c2Idx = msgs.findIndex((m) => m.role === "toolResult" && m.toolCallId === "c2");
+  const steerIdx = msgs.findIndex(
+    (m) => m.role === "user" && m.content.includes("改方向"),
+  );
+  assert.ok(c1Idx === assistantIdx + 1, "c1 结果应紧跟 assistant");
+  assert.ok(c2Idx === c1Idx + 1, "c2 跳过结果应紧跟 c1");
+  assert.ok(steerIdx === c2Idx + 1, "steering 注入应在两个 toolResult 之后");
+  assert.ok(
+    (msgs[steerIdx] as { content: string }).content.startsWith("[中途插入指令] "),
+    "steering 注入保留中途插入前缀",
+  );
+
+  // c1 真执行了，c2 没执行（c2 若执行会返回 slow:b，但它的结果是跳过错误）
+  const c1Result = msgs[c1Idx];
+  assert.ok(c1Result?.role === "toolResult" && !c1Result.isError);
+  assert.match(c1Result.content[0]?.text ?? "", /slow:a/);
+
+  // 最后一轮模型按新指令收尾
+  const assistants = msgs.filter((m) => m.role === "assistant");
+  const last = assistants[assistants.length - 1];
+  assert.ok(last?.role === "assistant");
+  assert.match(
+    last.content.find((c) => c.type === "text")?.text ?? "",
+    /已按新指令调整/,
   );
 });
 
@@ -1128,23 +1930,1119 @@ test("bash 工具：非 win32 上能跑 echo bash-ok", async () => {
   }
 });
 
-// ---------------------------------------------------------------- runner
+// ───────────── pause / resume 接 Agent.onEvent 真起作用 ─────────────
+import { SessionManager } from "../desktop/main/session.js";
+import DesktopDisplayConnector from "../src/connector/connectors/desktop-display/index.js";
+import { createDisplayRoute } from "../src/connector/runtime/display-route.js";
+import { ConnectorRegistry } from "../src/connector/registry/connector-registry.js";
+import type { DisplayEvent } from "../src/connector/core/types.js";
+import type { WireEvent } from "../desktop/shared/api.js";
 
-async function main(): Promise<void> {
-  let failed = 0;
-  for (const c of cases) {
-    const started = Date.now();
-    try {
-      await c.fn();
-      console.log(`  ✓ ${c.name} (${Date.now() - started}ms)`);
-    } catch (err) {
-      failed += 1;
-      console.log(`  ✗ ${c.name}`);
-      console.log(`    ${String(err)}`);
+/**
+ * 真链路装配：SessionManager 的 emit → createDisplayRoute → DesktopDisplayConnector
+ * （transport 是数组收集器）。测试断言的是渲染层实际收到的 WireEvent，
+ * 与 desktop/main/index.ts 的装配方式保持同构。
+ */
+function makeWireCollector(): {
+  deps: { emit: (event: DisplayEvent) => void };
+  wires: WireEvent[];
+} {
+  const wires: WireEvent[] = [];
+  const display = new DesktopDisplayConnector({ transport: (w) => wires.push(w) });
+  const registry = new ConnectorRegistry();
+  registry.register({
+    manifest: {
+      id: "desktop-display",
+      version: "0.0.0-test",
+      type: "desktop",
+      capabilities: [],
+    },
+    instance: display,
+    state: "ready",
+    rootDir: "/test/desktop-display",
+  });
+  const route = createDisplayRoute({ registry }, () => {
+    throw new Error("有 display connector 时 fallback 不应被调用");
+  });
+  return { deps: { emit: (event) => route(event) }, wires };
+}
+
+test("pause 真接入：pause 后 stream 文本不再 emit 直到 resume()", async () => {
+  // 慢流：每个 token 之间 30ms，给 pause 留出空档
+  function slowStream(options: StreamOptions): AsyncGenerator<import("../src/providers/types.js").StreamEvent> {
+    const text = "hello world this is a slow stream payload";
+    return (async function* () {
+      // partial 类型是 AssistantMessage，缺 role/stopReason/usage/timestamp 会 typecheck 失败
+      const partial = {
+        role: "assistant" as const,
+        content: [],
+        model: options.model.id,
+        stopReason: "stop" as const,
+        usage: emptyUsage(),
+        timestamp: Date.now(),
+      };
+      yield { type: "start", partial };
+      for (let i = 0; i < text.length; i += 1) {
+        await new Promise((r) => setTimeout(r, 30));
+        yield { type: "text_delta", delta: text[i]!, partial };
+      }
+      yield {
+        type: "done",
+        reason: "stop",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text }],
+          model: options.model.id,
+          stopReason: "stop",
+          usage: emptyUsage(),
+          timestamp: Date.now(),
+        },
+      };
+    })();
+  }
+
+  const cwd = await tempDir();
+  const state = createInitialState({
+    cwd,
+    model: { provider: "mock", id: "mock-1" },
+    tools: [],
+  });
+  const ctx = await import("../src/context/index.js");
+  const queue = new ctx.MessageQueue();
+  const { deps, wires: received } = makeWireCollector();
+
+  const sm = new SessionManager(
+    { state, queue, resolved: { model: { provider: "mock", id: "mock-1" }, stream: slowStream } },
+    deps,
+  );
+
+  // 50ms 后 pause；600ms 后 resume
+  setTimeout(() => {
+    sm.pause();
+  }, 50);
+  const resumeAt = new Promise<void>((r) =>
+    setTimeout(() => {
+      sm.resume();
+      r();
+    }, 600),
+  );
+
+  await sm.submit("run slow stream", []);
+  await resumeAt;
+  // 缓冲让流跑完
+  await new Promise((r) => setTimeout(r, 200));
+
+  const pausedIdx = received.findIndex((e) => e.t === "paused");
+  const resumedIdx = received.findIndex((e) => e.t === "resumed");
+  assert.ok(pausedIdx !== -1, "应当推过 `paused` 事件");
+  assert.ok(resumedIdx !== -1, "应当推过 `resumed` 事件");
+  assert.ok(resumedIdx > pausedIdx, "resumed 必须在 paused 之后");
+
+  // 暂停期间不应有 text 事件出来
+  const textEvents = received.filter((e) => e.t === "text");
+  const duringPause = textEvents.filter((e) => {
+    const idx = received.indexOf(e);
+    return idx > pausedIdx && idx < resumedIdx;
+  });
+  assert.equal(
+    duringPause.length,
+    0,
+    `pause 期间不应有 text 增量，实际 ${duringPause.length} 条（pause gate 必须真起到停流作用）`,
+  );
+
+  // resume 之后 text 必须恢复
+  const afterResume = textEvents.filter((e) => received.indexOf(e) >= resumedIdx);
+  assert.ok(afterResume.length > 0, "resume 之后应当继续推 text 增量");
+
+  await fs.rm(cwd, { recursive: true, force: true });
+});
+
+test("submit 真接入：用户输入广播为 user_text，且先于 start（真链路）", async () => {
+  function instantStream(options: StreamOptions): AsyncGenerator<import("../src/providers/types.js").StreamEvent> {
+    return (async function* () {
+      const partial = {
+        role: "assistant" as const,
+        content: [],
+        model: options.model.id,
+        stopReason: "stop" as const,
+        usage: emptyUsage(),
+        timestamp: Date.now(),
+      };
+      yield { type: "start", partial };
+      yield {
+        type: "done",
+        reason: "stop",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "ok" }],
+          model: options.model.id,
+          stopReason: "stop",
+          usage: emptyUsage(),
+          timestamp: Date.now(),
+        },
+      };
+    })();
+  }
+
+  const cwd = await tempDir();
+  const state = createInitialState({
+    cwd,
+    model: { provider: "mock", id: "mock-1" },
+    tools: [],
+  });
+  const ctx = await import("../src/context/index.js");
+  const queue = new ctx.MessageQueue();
+  const { deps, wires } = makeWireCollector();
+
+  const sm = new SessionManager(
+    { state, queue, resolved: { model: { provider: "mock", id: "mock-1" }, stream: instantStream } },
+    deps,
+  );
+  await sm.submit("你好", []);
+  await new Promise((r) => setTimeout(r, 150));
+
+  const userIdx = wires.findIndex((e) => e.t === "user_text");
+  const startIdx = wires.findIndex((e) => e.t === "start");
+  assert.ok(userIdx !== -1, "submit 必须广播 user_text（独立 UI 靠它显示用户输入）");
+  assert.deepEqual(wires[userIdx], { t: "user_text", text: "你好" });
+  assert.ok(startIdx !== -1 && userIdx < startIdx, "user_text 必须先于本轮 start");
+
+  // steer 也广播
+  wires.length = 0;
+  sm.steer("插一句");
+  const steerIdx = wires.findIndex((e) => e.t === "user_text");
+  assert.ok(steerIdx !== -1, "steer 也要广播 user_text");
+  assert.deepEqual(wires[steerIdx], { t: "user_text", text: "插一句" });
+
+  await fs.rm(cwd, { recursive: true, force: true });
+});
+
+// ───────────── reasoning / endpoint / mode 真接入 ─────────────
+import { MessageQueue } from "../src/context/index.js";
+
+test("reasoning 真接入：fast/balanced/ultra 写 maxTokens；mock 不写", () => {
+  const cwd = process.cwd();
+  const state = createInitialState({
+    cwd,
+    model: { provider: "openai", id: "gpt-4o-mini" },
+    tools: [],
+  });
+  const queue2 = new MessageQueue();
+  const sm = new SessionManager(
+    { state, queue: queue2, resolved: { model: { provider: "openai", id: "gpt-4o-mini" }, stream: createMockStream({ delayMs: 0 }) } },
+    { emit: () => {} },
+  );
+
+  assert.equal(sm.info().maxTokens, 4096, "balanced → 4096");
+  sm.setReasoning("fast");
+  assert.equal(sm.info().maxTokens, 1024, "fast → 1024");
+  sm.setReasoning("ultra");
+  assert.equal(sm.info().maxTokens, 8192, "ultra → 8192");
+
+  sm.setEndpoint("mock");
+  assert.equal(sm.info().maxTokens, 0, "mock 不写 maxTokens");
+  sm.setReasoning("fast");
+  assert.equal(sm.info().maxTokens, 0, "mock + fast → 0");
+
+  void cwd;
+});
+
+test("reasoning auto：不锁 maxTokens，thinkingLevel 落 low，agent 开动态升降", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "openai", id: "gpt-4o-mini" },
+    tools: [],
+  });
+  const sm = new SessionManager(
+    { state, queue: new MessageQueue(), resolved: { model: { provider: "openai", id: "gpt-4o-mini" }, stream: createMockStream({ delayMs: 0 }) } },
+    { emit: () => {} },
+  );
+
+  sm.setReasoning("auto");
+  assert.equal(sm.info().maxTokens, 0, "auto 不锁 maxTokens（走端点默认）");
+  assert.equal(sm.getState().thinkingLevel, "low", "auto 基准档 low");
+  // 从 ultra 切回 auto：旧档位残留的 8192 上限要被清掉
+  sm.setReasoning("ultra");
+  assert.equal(sm.info().maxTokens, 8192);
+  sm.setReasoning("auto");
+  assert.equal(sm.info().maxTokens, 0, "切回 auto 清掉残留上限");
+});
+
+test("reasoning 固定档映射 thinkingLevel：fast→low / balanced→medium / ultra→high", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "openai", id: "gpt-4o-mini" },
+    tools: [],
+  });
+  const sm = new SessionManager(
+    { state, queue: new MessageQueue(), resolved: { model: { provider: "openai", id: "gpt-4o-mini" }, stream: createMockStream({ delayMs: 0 }) } },
+    { emit: () => {} },
+  );
+
+  sm.setReasoning("ultra");
+  assert.equal(sm.getState().thinkingLevel, "high");
+  sm.setReasoning("balanced");
+  assert.equal(sm.getState().thinkingLevel, "medium");
+  sm.setReasoning("fast");
+  assert.equal(sm.getState().thinkingLevel, "low");
+});
+
+test("setCustomModel：三要素构造 OpenAI 兼容 ModelRef；坏输入 fail-visible", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "openai", id: "gpt-4o-mini" },
+    tools: [],
+  });
+  const sm = new SessionManager(
+    { state, queue: new MessageQueue(), resolved: { model: { provider: "openai", id: "gpt-4o-mini" }, stream: createMockStream({ delayMs: 0 }) } },
+    { emit: () => {} },
+  );
+
+  // 正常路径：baseUrl / key 原样落到 ModelRef，modelSpec 同步更新
+  const out = sm.setCustomModel({
+    baseURL: "https://api.deepseek.com/v1/",
+    apiKey: "sk-test",
+    model: "deepseek-chat",
+  });
+  assert.equal(out.model, "deepseek:deepseek-chat", "label 前缀从 baseUrl 域名推导");
+  assert.equal(sm.info().baseURL, "https://api.deepseek.com/v1", "尾部 / 剥掉");
+  assert.equal(sm.info().modelSpec, "openai:deepseek-chat");
+  assert.equal(sm.info().endpoint, "openai");
+
+  // apiKey 留空：本地无 key 端点用 "EMPTY" 占位，不降级 mock
+  sm.setCustomModel({ baseURL: "http://127.0.0.1:1234/v1", apiKey: "", model: "local-model" });
+  assert.equal(sm.info().degraded, undefined, "空 key 用 EMPTY 占位不应降级");
+
+  // 坏输入：抛 Error（dispatchApi 转 rejected promise，弹窗可见），状态不被污染
+  assert.throws(() => sm.setCustomModel({ baseURL: "api.deepseek.com/v1", apiKey: "k", model: "m" }), /接口地址/);
+  assert.throws(() => sm.setCustomModel({ baseURL: "https://x.com/v1", apiKey: "", model: " " }), /模型名称/);
+  assert.throws(
+    () => sm.setCustomModel({ baseURL: "https://x.com", apiKey: "", model: "m", protocol: "grpc" as never }),
+    /不支持的协议/,
+  );
+  assert.equal(sm.info().modelSpec, "openai:local-model", "抛错后模型保持上一次成功值");
+});
+
+test("setCustomModel：上下文窗口手动覆写（k/m 后缀、非法格式、留空回退）", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "openai", id: "gpt-4o-mini" },
+    tools: [],
+  });
+  const sm = new SessionManager(
+    { state, queue: new MessageQueue(), resolved: { model: { provider: "openai", id: "gpt-4o-mini" }, stream: createMockStream({ delayMs: 0 }) } },
+    { emit: () => {} },
+  );
+
+  // 手动覆写：k/m 后缀解析为 token 数，info() 分母与 Agent 预算跟着走
+  sm.setCustomModel({ baseURL: "https://x.io/v1", apiKey: "k", model: "my-model", contextWindow: "256k" });
+  assert.equal(sm.info().contextWindow, 256_000, "256k = 256,000（十进制，与厂商口径一致）");
+  sm.setCustomModel({ baseURL: "https://x.io/v1", apiKey: "k", model: "my-model", contextWindow: "1M" });
+  assert.equal(sm.info().contextWindow, 1_000_000, "后缀大小写不限");
+
+  // 非法格式：fail-visible，状态不回退
+  assert.throws(
+    () => sm.setCustomModel({ baseURL: "https://x.io/v1", apiKey: "k", model: "m2", contextWindow: "abc" }),
+    /上下文窗口/,
+  );
+  assert.equal(sm.info().modelSpec, "openai:my-model", "抛错后模型保持上一次成功值");
+
+  // 留空：未知模型按 1M 兜底（用户定调），不再被填回的粗表值覆盖手动值
+  sm.setCustomModel({ baseURL: "https://x.io/v1", apiKey: "k", model: "my-model" });
+  assert.equal(sm.info().contextWindow, 1_000_000);
+});
+
+test("setAutoCompact：设置弹窗开关回显 info，默认开启", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "openai", id: "gpt-4o-mini" },
+    tools: [],
+  });
+  const sm = new SessionManager(
+    { state, queue: new MessageQueue(), resolved: { model: { provider: "openai", id: "gpt-4o-mini" }, stream: createMockStream({ delayMs: 0 }) } },
+    { emit: () => {} },
+  );
+
+  assert.equal(sm.info().autoCompact, true, "默认开启（内核 autoCompact 缺省 true）");
+  sm.setAutoCompact(false);
+  assert.equal(sm.info().autoCompact, false, "关闭后 info 回显，设置弹层靠它回显开关");
+  sm.setAutoCompact(true);
+  assert.equal(sm.info().autoCompact, true);
+});
+
+test("setMsgWindow：独立消息弹窗默认不开启，开关回显 info", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "openai", id: "gpt-4o-mini" },
+    tools: [],
+  });
+  const sm = new SessionManager(
+    { state, queue: new MessageQueue(), resolved: { model: { provider: "openai", id: "gpt-4o-mini" }, stream: createMockStream({ delayMs: 0 }) } },
+    { emit: () => {} },
+  );
+
+  assert.equal(sm.info().msgWindow, false, "默认不开启（用户定调）");
+  sm.setMsgWindow(true);
+  assert.equal(sm.info().msgWindow, true, "开启后 info 回显，设置弹层靠它回显开关");
+  sm.setMsgWindow(false);
+  assert.equal(sm.info().msgWindow, false);
+});
+
+test("setCustomModel：anthropic / gemini 协议直接构造对应 provider", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "openai", id: "gpt-4o-mini" },
+    tools: [],
+  });
+  const sm = new SessionManager(
+    { state, queue: new MessageQueue(), resolved: { model: { provider: "openai", id: "gpt-4o-mini" }, stream: createMockStream({ delayMs: 0 }) } },
+    { emit: () => {} },
+  );
+
+  // anthropic：base 是根路径——用户手滑带 /v1 要剥掉（否则 /v1/v1/messages）
+  sm.setCustomModel({
+    baseURL: "https://api.anthropic.com/v1/",
+    apiKey: "sk-ant",
+    model: "claude-sonnet-4-5",
+    protocol: "anthropic",
+  });
+  assert.equal(sm.info().baseURL, "https://api.anthropic.com");
+  assert.equal(sm.info().modelSpec, "anthropic:claude-sonnet-4-5");
+  assert.equal(sm.info().endpoint, "anthropic");
+
+  // gemini：base 到 /v1beta，原样保留
+  sm.setCustomModel({
+    baseURL: "https://generativelanguage.googleapis.com/v1beta",
+    apiKey: "g-key",
+    model: "gemini-2.5-flash",
+    protocol: "gemini",
+  });
+  assert.equal(sm.info().baseURL, "https://generativelanguage.googleapis.com/v1beta");
+  assert.equal(sm.info().modelSpec, "gemini:gemini-2.5-flash");
+  assert.equal(sm.info().endpoint, "gemini");
+  assert.equal(sm.info().degraded, undefined);
+});
+
+// ----------------------------------------------------- gemini 原生适配器
+
+test("geminiStream：SSE 解析 text/thought/functionCall/usage；请求形状正确", async () => {
+  const { geminiStream } = await import("../src/providers/gemini.js");
+  const enc = new TextEncoder();
+  let i = 0;
+  const chunks = [
+    'data: {"candidates":[{"content":{"parts":[{"text":"你"}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1}}\n\n',
+    'data: {"candidates":[{"content":{"parts":[{"text":"好"},{"text":"想一下","thought":true}]}}]}\n\n',
+    'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{"path":"a.ts"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"thoughtsTokenCount":3}}\n\n',
+  ];  const captured: { url: string; headers: Record<string, string> }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: unknown, init?: { headers?: Record<string, string> }) => {
+    captured.push({
+      url: String(url),
+      headers: (init?.headers ?? {}) as Record<string, string>,
+    });
+    return {
+      ok: true,
+      status: 200,
+      body: new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (i < chunks.length) controller.enqueue(enc.encode(chunks[i++]!));
+          else controller.close();
+        },
+      }),
+    } as unknown as Response;
+  }) as unknown as typeof fetch;
+
+  try {
+    const gen = geminiStream({
+      model: { provider: "gemini", id: "gemini-2.5-flash", baseUrl: "https://g.example/v1beta", apiKey: "g-key" },
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      tools: [],
+      thinkingLevel: "medium",
+    });
+    const events: StreamEvent[] = [];
+    for await (const e of gen) {
+      events.push(e);
+    }
+
+    // 请求形状：URL、鉴权 header、thinkingConfig
+    assert.equal(captured.length, 1);
+    assert.equal(
+      captured[0]!.url,
+      "https://g.example/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+    );
+    assert.equal(captured[0]!.headers["x-goog-api-key"], "g-key");
+
+    // 事件流：start → text_delta("你") → text_delta("好") → thinking_delta("想一下") → toolcall_end(read) → done
+    const types = events.map((e) => e.type);
+    assert.deepEqual(types, ["start", "text_delta", "text_delta", "thinking_delta", "toolcall_end", "done"]);
+    const toolCallEnd = events[4] as { type: "toolcall_end"; toolCall: { id: string; name: string; arguments: Record<string, unknown> } };
+    assert.equal(toolCallEnd.toolCall.name, "read");
+    assert.deepEqual(toolCallEnd.toolCall.arguments, { path: "a.ts" });
+    assert.ok(toolCallEnd.toolCall.id.startsWith("call_"), "gemini 无 tool call id，应自造 call_N");
+
+    const done = events[5] as { type: "done"; reason: string; message: { usage: { input: number; output: number } } };
+    assert.equal(done.reason, "toolUse", "含 functionCall → toolUse");
+    assert.equal(done.message.usage.input, 10);
+    assert.equal(done.message.usage.output, 8, "candidates 5 + thoughts 3");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("openaiStream：透传 sessionId 为 x-opencode-session 头 + 自定义 UA", async () => {
+  const { openaiStream } = await import("../src/providers/openai.js");
+  const chunks = ['data: {"choices":[{"delta":{"content":"好"},"finish_reason":null}]}\n\n', "data: [DONE]\n\n"];
+  const captured: { url: string; headers: Record<string, string> }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: unknown, init?: { headers?: Record<string, string> }) => {
+    captured.push({
+      url: String(url),
+      headers: (init?.headers ?? {}) as Record<string, string>,
+    });
+    const enc = new TextEncoder();
+    let i = 0;
+    return {
+      ok: true,
+      status: 200,
+      body: new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (i < chunks.length) controller.enqueue(enc.encode(chunks[i++]!));
+          else controller.close();
+        },
+      }),
+    } as unknown as Response;
+  }) as unknown as typeof fetch;
+
+  try {
+    const gen = openaiStream({
+      model: { provider: "openai", id: "mimo-v2.5", baseUrl: "https://opencode.ai/zen/go/v1", apiKey: "k" },
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      tools: [],
+      thinkingLevel: "low",
+      sessionId: "sess-fixed-123",
+    });
+    for await (const _e of gen) {
+      void _e; // 消费事件流
+    }
+
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0]!.headers["x-opencode-session"], "sess-fixed-123", "opencode zen go 中继要求会话头，缺失 400");
+    assert.equal(captured[0]!.headers["user-agent"], "c-agent/0.1", "文档禁止 generic SDK 默认 UA");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("parseModelsResponse：gemini 端点的 models[] 格式（name 剥 models/ 前缀）", async () => {
+  const { parseModelsResponse } = await import("../desktop/main/session.js");
+  const out = parseModelsResponse(
+    {
+      models: [
+        { name: "models/gemini-2.5-flash", displayName: "Gemini 2.5 Flash", inputTokenLimit: 1048576 },
+        { name: "embedding-001", description: "embedding" },
+        { name: "" },
+      ],
+    },
+    "gemini",
+  );
+  assert.equal(out.length, 2);
+  assert.deepEqual(out[0], { id: "gemini-2.5-flash", ownedBy: "Gemini 2.5 Flash", contextWindow: 1048576 });
+  assert.equal(out[1]!.id, "embedding-001");
+
+  // openai 端点行为不变：data[] 数组
+  const oa = parseModelsResponse({ data: [{ id: "gpt-4o-mini", owned_by: "openai" }] }, "openai");
+  assert.equal(oa.length, 1);
+  assert.equal(oa[0]!.id, "gpt-4o-mini");
+});
+
+
+test("setEndpoint 真接入：endpoint 字段随调用立即更新", () => {
+  const cwd = process.cwd();
+  const state = createInitialState({
+    cwd,
+    model: { provider: "openai", id: "gpt-4o-mini" },
+    tools: [],
+  });
+  const queue3 = new MessageQueue();
+  const sm = new SessionManager(
+    { state, queue: queue3, resolved: { model: { provider: "openai", id: "gpt-4o-mini" }, stream: createMockStream({ delayMs: 0 }) } },
+    { emit: () => {} },
+  );
+
+  assert.equal(sm.info().endpoint, "openai");
+  sm.setEndpoint("mock");
+  assert.equal(sm.info().endpoint, "mock");
+  sm.setEndpoint("anthropic");
+  assert.equal(sm.info().endpoint, "anthropic");
+
+  void cwd;
+});
+
+test("setMode 真接入：mode 字段被持久化（下次 start 时由 assembleSession 装配）", () => {
+  const cwd = process.cwd();
+  const state = createInitialState({
+    cwd,
+    model: { provider: "mock", id: "mock-1" },
+    tools: [],
+  });
+  const queue4 = new MessageQueue();
+  const sm = new SessionManager(
+    { state, queue: queue4, resolved: { model: { provider: "mock", id: "mock-1" }, stream: createMockStream({ delayMs: 0 }) } },
+    { emit: () => {} },
+  );
+
+  assert.equal(sm.getMode(), "full");
+  sm.setMode("answer_only");
+  assert.equal(sm.getMode(), "answer_only");
+  sm.setMode("plan");
+  assert.equal(sm.getMode(), "plan");
+
+  void cwd;
+});
+
+// ───────────── 多会话：newSession 归档 + switchSession 切换 ─────────────
+
+test("多会话：newSession 归档旧会话，switchSession 可切回且消息保留", () => {
+  const cwd = process.cwd();
+  const state = createInitialState({
+    cwd,
+    model: { provider: "mock", id: "mock-1" },
+    tools: [],
+  });
+  const sm = new SessionManager(
+    { state, queue: new MessageQueue(), resolved: { model: { provider: "mock", id: "mock-1" }, stream: createMockStream({ delayMs: 0 }) } },
+    { emit: () => {} },
+  );
+
+  // 初始 1 个会话；往当前会话塞一条用户消息
+  appendNode(sm.getState(), { role: "user", content: "第一条会话的消息", timestamp: 1 });
+  assert.equal(sm.getState().messages.length, 1);
+
+  // newSession：归档旧会话 + 新建空会话 → total=2，当前 index=1
+  sm.newSession();
+  assert.equal(sm.getState().messages.length, 0);
+
+  // ← 切回第一个会话：消息还在（归档而非销毁）
+  const back = sm.switchSession(-1);
+  assert.deepEqual(back, { index: 0, total: 2 });
+  assert.equal(sm.getState().messages.length, 1);
+
+  // → 回到第二个；再 ← 越界夹在 0；→ 越界夹在末尾
+  assert.deepEqual(sm.switchSession(1), { index: 1, total: 2 });
+  assert.deepEqual(sm.switchSession(1), { index: 1, total: 2 });
+  assert.deepEqual(sm.switchSession(-1), { index: 0, total: 2 });
+  assert.deepEqual(sm.switchSession(-1), { index: 0, total: 2 });
+  assert.equal(sm.getState().messages.length, 1);
+
+  void cwd;
+});
+
+test("多会话：plan review 状态随会话保留（切走再切回不丢）", () => {
+  const cwd = process.cwd();
+  const state = createInitialState({
+    cwd,
+    model: { provider: "mock", id: "mock-1" },
+    tools: [],
+  });
+  const sm = new SessionManager(
+    { state, queue: new MessageQueue(), resolved: { model: { provider: "mock", id: "mock-1" }, stream: createMockStream({ delayMs: 0 }) } },
+    { emit: () => {} },
+  );
+  sm.setMode("plan");
+  // 直接翻内部状态模拟「plan review 中」（不走完整 agent 轮次）
+  sm["planPending"] = true;
+  sm["planRound"] = 3;
+
+  sm.newSession();
+  assert.equal(sm.isPlanPending(), false); // 新会话不在 review
+
+  sm.switchSession(-1);
+  assert.equal(sm.isPlanPending(), true); // 切回后恢复
+
+  sm.switchSession(1);
+  assert.equal(sm.isPlanPending(), false);
+
+  void cwd;
+});
+
+// ───────────── listModels：可配置的动态模型列表 ─────────────
+import { parseModelsResponse, resolveModelsUrl } from "../desktop/main/session.js";
+
+/** 保存并替换 env，测试结束还原（不污染其他用例） */
+function withEnv(values: Record<string, string | undefined>, fn: () => void): void {
+  const saved: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(values)) {
+    saved[k] = process.env[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
     }
   }
-  console.log(`\n${cases.length - failed}/${cases.length} 通过`);
-  if (failed > 0) process.exitCode = 1;
+}
+
+test("resolveModelsUrl：默认按 baseUrl 推导；env 显式覆盖优先；mock 无 URL", () => {
+  withEnv(
+    {
+      OPENAI_MODELS_URL: undefined,
+      OPENAI_BASE_URL: "https://opencode.ai/zen/go/v1",
+      ANTHROPIC_MODELS_URL: undefined,
+      ANTHROPIC_BASE_URL: undefined,
+    },
+    () => {
+      // openai baseUrl 含 /v1 → models 直接拼 /models
+      assert.equal(resolveModelsUrl("openai"), "https://opencode.ai/zen/go/v1/models");
+      // anthropic baseUrl 不含 /v1 → 拼 /v1/models
+      assert.equal(resolveModelsUrl("anthropic"), "https://api.anthropic.com/v1/models");
+      // mock 不走网络
+      assert.equal(resolveModelsUrl("mock"), undefined);
+    },
+  );
+  withEnv({ OPENAI_MODELS_URL: "https://custom.example.com/v1/all-models" }, () => {
+    assert.equal(
+      resolveModelsUrl("openai"),
+      "https://custom.example.com/v1/all-models",
+      "OPENAI_MODELS_URL 必须优先于 baseUrl 推导",
+    );
+  });
+});
+
+test("parseModelsResponse：OpenAI 兼容格式解析；缺 id 跳过；坏结构报错", () => {
+  const ok = parseModelsResponse({
+    object: "list",
+    data: [
+      { id: "glm-5.3", object: "model", created: 1, owned_by: "opencode" },
+      { id: "kimi-k3", object: "model", context_window: 262144 },
+      { object: "model" }, // 缺 id → 跳过
+      { id: "", object: "model" }, // 空 id → 跳过
+    ],
+  });
+  assert.equal(ok.length, 2);
+  assert.deepEqual(ok[0], { id: "glm-5.3", ownedBy: "opencode" });
+  assert.deepEqual(ok[1], { id: "kimi-k3", contextWindow: 262144 });
+
+  // context_length 别名也认
+  const alias = parseModelsResponse({ data: [{ id: "m", context_length: 8192 }] });
+  assert.equal(alias[0]?.contextWindow, 8192);
+
+  // 坏结构必须 throw（fetchModelsFor 会转成 result.error，让前端回退静态预设）
+  assert.throws(() => parseModelsResponse(null));
+  assert.throws(() => parseModelsResponse({}));
+  assert.throws(() => parseModelsResponse({ data: "not-array" }));
+  assert.throws(() => parseModelsResponse({ data: [] }));
+  assert.throws(() => parseModelsResponse({ data: [{ no: "id" }] }));
+});
+
+test("listModels：mock 走固定列表不打网络；openai 用注入 fetch + 5min 缓存 + refresh 强刷 + HTTP 错误回退", async () => {
+  const cwd = process.cwd();
+  const state = createInitialState({ cwd, model: { provider: "mock", id: "mock-1" }, tools: [] });
+  const queue = new MessageQueue();
+
+  // mock：fetchModels 若被调用就让测试失败
+  const smMock = new SessionManager(
+    { state, queue, resolved: { model: { provider: "mock", id: "mock-1" }, stream: createMockStream({ delayMs: 0 }) } },
+    {
+      emit: () => {},
+      fetchModels: (async () => {
+        throw new Error("mock 端点不应打网络");
+      }) as unknown as typeof fetch,
+    },
+  );
+  const mockResult = await smMock.listModels("mock");
+  assert.equal(mockResult.error, undefined);
+  assert.equal(mockResult.models.length, 1);
+  assert.equal(mockResult.models[0]?.id, "mock");
+
+  // openai：注入 fake fetch
+  let calls = 0;
+  const payload = { object: "list", data: [{ id: "glm-5.3", owned_by: "opencode" }] };
+  const fakeFetch = (async () => {
+    calls += 1;
+    if (calls === 2) {
+      // 第 2 次（refresh 后那次）模拟服务端 500
+      return { ok: false, status: 500, json: async () => ({}) } as unknown as Response;
+    }
+    return { ok: true, status: 200, json: async () => payload } as unknown as Response;
+  }) as unknown as typeof fetch;
+
+  const smOpenai = new SessionManager(
+    { state, queue, resolved: { model: { provider: "openai", id: "gpt-4o-mini" }, stream: createMockStream({ delayMs: 0 }) } },
+    { emit: () => {}, fetchModels: fakeFetch },
+  );
+  const r1 = await smOpenai.listModels("openai");
+  assert.equal(r1.error, undefined);
+  assert.equal(r1.models[0]?.id, "glm-5.3");
+  assert.equal(r1.url.endsWith("/models"), true, "URL 应按 baseUrl 推导出 /models");
+  assert.equal(calls, 1);
+
+  // 缓存：第二次不再打网络
+  const r2 = await smOpenai.listModels("openai");
+  assert.equal(calls, 1, "TTL 内应命中缓存");
+  assert.equal(r2.models[0]?.id, "glm-5.3");
+
+  // refresh=true 强制刷新 → 第 3 次调用模拟 HTTP 500 → error 回退且不打成功缓存
+  const r3 = await smOpenai.listModels("openai", true);
+  assert.equal(calls, 2, "refresh=true 应绕过缓存");
+  assert.ok(
+    r3.error !== undefined && r3.error.includes("500"),
+    `HTTP 500 应转成 error 字符串，实际 ${String(r3.error)}`,
+  );
+  assert.equal(r3.models.length, 0);
+
+  // refresh 失败后旧的成功缓存仍在（TTL 内）：非 refresh 再拉命中旧缓存，不打网络。
+  // 语义：失败不打掉已有成功结果——UI 点刷新失败时列表还能显示旧数据。
+  const r4 = await smOpenai.listModels("openai");
+  assert.equal(calls, 2, "失败不应打掉 TTL 内的成功缓存");
+  assert.equal(r4.error, undefined);
+  assert.equal(r4.models[0]?.id, "glm-5.3");
+
+  void cwd;
+});
+
+test("info().contextWindow：优先取提供商 /models 元数据；warmModelsCache 拉到后广播 refresh-info", async () => {
+  const cwd = process.cwd();
+  const state = createInitialState({ cwd, model: { provider: "mock", id: "mock-1" }, tools: [] });
+  const queue = new MessageQueue();
+  const payload = {
+    object: "list",
+    data: [{ id: "glm-5.3", owned_by: "opencode", context_window: 200000 }],
+  };
+  const requestedUrls: string[] = [];
+  const fakeFetch = (async (url: string | URL) => {
+    requestedUrls.push(String(url));
+    return { ok: true, status: 200, json: async () => payload } as unknown as Response;
+  }) as unknown as typeof fetch;
+
+  const sm = new SessionManager(
+    { state, queue, resolved: { model: { provider: "openai", id: "glm-5.3" }, stream: createMockStream({ delayMs: 0 }) } },
+    { emit: () => {}, fetchModels: fakeFetch },
+  );
+  // 未预热：元数据缓存为空 → 回退内置粗表（glm-5.3 不在表里 → 1M 兜底，用户定调）
+  assert.equal(sm.info().contextWindow, 1_000_000);
+
+  // 拉到提供商元数据 → 返回 true（主进程据此广播 refresh-info），分母换成真值
+  assert.equal(await sm.warmModelsCache(), true);
+  assert.equal(sm.info().contextWindow, 200000);
+  assert.equal(requestedUrls.some((u) => u.endsWith("/models")), true, "应请求端点推导的 /models URL");
+  // TTL 内再预热：值没变化 → false，不再广播
+  assert.equal(await sm.warmModelsCache(), false);
+  void cwd;
+});
+
+test("info().contextWindow：自定义模型 baseUrl 直连 /models 的元数据也认", async () => {
+  const state = createInitialState({ cwd: process.cwd(), model: { provider: "mock", id: "mock-1" }, tools: [] });
+  const queue = new MessageQueue();
+  const payload = { object: "list", data: [{ id: "my-model", context_window: 96000 }] };
+  const requestedUrls: string[] = [];
+  const fakeFetch = (async (url: string | URL) => {
+    requestedUrls.push(String(url));
+    return { ok: true, status: 200, json: async () => payload } as unknown as Response;
+  }) as unknown as typeof fetch;
+  const sm = new SessionManager(
+    {
+      state,
+      queue,
+      resolved: {
+        model: { provider: "openai", id: "my-model", baseUrl: "https://custom.example.com/v1", apiKey: "sk-test" },
+        stream: createMockStream({ delayMs: 0 }),
+      },
+    },
+    { emit: () => {}, fetchModels: fakeFetch },
+  );
+  assert.equal(await sm.warmModelsCache(), true);
+  assert.equal(sm.info().contextWindow, 96000);
+  assert.ok(
+    requestedUrls.includes("https://custom.example.com/v1/models"),
+    `应请求自定义 baseUrl 直连的 /models，实际：${JSON.stringify(requestedUrls)}`,
+  );
+});
+
+// ───────────── macOS 听写：helper stdout 协议解析 ─────────────
+import { parseDictationLine } from "../desktop/main/dictation.js";
+
+test("parseDictationLine：ready/partial/final/error 四种行；坏行静默丢弃", () => {
+  assert.deepEqual(parseDictationLine('{"kind":"ready"}'), { kind: "ready", text: "" });
+  assert.deepEqual(parseDictationLine('{"kind":"partial","text":"你好"}'), {
+    kind: "partial",
+    text: "你好",
+  });
+  assert.deepEqual(parseDictationLine('{"kind":"final","text":"你好世界"}'), {
+    kind: "final",
+    text: "你好世界",
+  });
+  assert.deepEqual(parseDictationLine('{"kind":"error","message":"麦克风权限被拒绝"}'), {
+    kind: "error",
+    text: "麦克风权限被拒绝",
+  });
+  // error 行也可能带 text（协议宽容）；两者都没有时空串
+  assert.deepEqual(parseDictationLine('{"kind":"error","text":"x"}'), { kind: "error", text: "x" });
+  assert.deepEqual(parseDictationLine('{"kind":"error"}'), { kind: "error", text: "" });
+
+  // 坏行 → null（不打断识别流）
+  assert.equal(parseDictationLine(""), null);
+  assert.equal(parseDictationLine("   \n"), null);
+  assert.equal(parseDictationLine("not-json"), null);
+  assert.equal(parseDictationLine('{"no-kind":1}'), null);
+  assert.equal(parseDictationLine("[]"), null);
+});
+
+// ------------------------------------------------- approval diff 预览（desktop）
+
+test("approval-diff：bash 给命令原文；未知工具退回 JSON 摘要", () => {
+  assert.equal(
+    buildApprovalDetail({ toolName: "bash", args: { command: "echo hi" }, cwd: "/tmp" }),
+    "echo hi",
+  );
+  const detail = buildApprovalDetail({ toolName: "ffmpeg_export", args: { input: "a.mp4" }, cwd: "/tmp" });
+  assert.match(detail, /"input"/, "非内置 mutating 工具退回 JSON 参数摘要");
+});
+
+test("approval-diff：write 新文件给头部预览，覆盖写给 -/+ diff", async () => {
+  const dir = await tempDir();
+
+  // 新文件：不存在 → 「新文件」+ 内容头部预览
+  const fresh = buildApprovalDetail({
+    toolName: "write",
+    args: { path: "new.txt", content: "l1\nl2\nl3" },
+    cwd: dir,
+  });
+  assert.match(fresh, /新文件/);
+  assert.match(fresh, /\| l1/);
+  assert.match(fresh, /3 行/);
+
+  // 覆盖写：读旧内容做 diff，中间改动块 -/+，前后未变行数注明
+  await fs.writeFile(path.join(dir, "a.txt"), "head\nold-1\nold-2\ntail", "utf8");
+  const overwrite = buildApprovalDetail({
+    toolName: "write",
+    args: { path: "a.txt", content: "head\nnew-1\nnew-2\ntail" },
+    cwd: dir,
+  });
+  assert.match(overwrite, /a\.txt（行数 4 → 4）/);
+  assert.match(overwrite, /前后共 2 行未变/);
+  assert.match(overwrite, /- old-1/);
+  assert.match(overwrite, /\+ new-1/);
+  assert.doesNotMatch(overwrite, /- head/, "未变行不出现在 diff 里");
+});
+
+test("approval-diff：edit 给行号与唯一性预检；找不到 oldString 提前告知", async () => {
+  const dir = await tempDir();
+  const file = path.join(dir, "b.txt");
+  await fs.writeFile(file, "one\ntwo\nthree\n", "utf8");
+
+  const unique = buildApprovalDetail({
+    toolName: "edit",
+    args: { path: file, oldString: "two", newString: "TWO" },
+    cwd: dir,
+  });
+  assert.match(unique, /1 处替换，第 2 行起/);
+  assert.match(unique, /- two/);
+  assert.match(unique, /\+ TWO/);
+
+  const missing = buildApprovalDetail({
+    toolName: "edit",
+    args: { path: file, oldString: "nope", newString: "x" },
+    cwd: dir,
+  });
+  assert.match(missing, /oldString 在文件中未找到，执行会失败/);
+
+  // "two"、"three" 里各出现一次 → 2 次
+  const dup = buildApprovalDetail({
+    toolName: "edit",
+    args: { path: file, oldString: "t", newString: "x" },
+    cwd: dir,
+  });
+  assert.match(dup, /出现 2 次，执行会失败/);
+});
+
+test("approval-diff：超长 diff 截断并注明省略量；文件过大不逐行 diff", async () => {
+  const dir = await tempDir();
+
+  // 旧文件 60 行 → 新内容 60 行：前后缀不重叠，-/+ 合计 120 行 → 截断到 40
+  const old60 = Array.from({ length: 60 }, (_, i) => `old${i}`).join("\n");
+  await fs.writeFile(path.join(dir, "big.txt"), old60, "utf8");
+  const many = buildApprovalDetail({
+    toolName: "write",
+    args: {
+      path: "big.txt",
+      content: Array.from({ length: 60 }, (_, i) => `new${i}`).join("\n"),
+    },
+    cwd: dir,
+  });
+  assert.match(many, /diff 共 120 行，已省略 80 行/);
+
+  // 旧文件超过 MAX_DIFF_FILE_LINES → 只给统计不给逐行
+  const hugeOld = Array.from({ length: 5200 }, () => "x").join("\n");
+  await fs.writeFile(path.join(dir, "huge.txt"), hugeOld, "utf8");
+  const stats = buildApprovalDetail({
+    toolName: "write",
+    args: { path: "huge.txt", content: "y" },
+    cwd: dir,
+  });
+  assert.match(stats, /文件过大，不生成逐行 diff/);
+  assert.match(stats, /行数 5200 → 1/);
+});
+
+test("prompts: 默认系统提示词带 Environment 事实（日期 / shell），不带规则化建议", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  // 感知注入是事实不是规则：日期、shell、运行时都在
+  assert.match(state.systemPrompt, /当前日期：\d{4}-\d{2}-\d{2}（周.）/);
+  assert.match(state.systemPrompt, /Shell：/);
+  assert.match(state.systemPrompt, /运行时：/);
+  // 快照建议句已按消失之问砍掉——事实给足，谨慎交给模型
+  assert.ok(!state.systemPrompt.includes("破坏性 git 操作"));
+});
+
+test("Environment：readGitSnapshot 带未提交文件数；非 git 目录返回 null", async () => {
+  const dir = await tempDir();
+  assert.equal(await readGitSnapshot(dir), null);
+
+  const git = (args: string[]) => promisify(execFile)("git", args, { cwd: dir });
+  await git(["init", "-q"]);
+  await git(["-c", "user.email=t@t.local", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "init"]);
+
+  const clean = await readGitSnapshot(dir);
+  assert.equal(clean?.dirty, false);
+  assert.equal(clean?.dirtyFiles, 0);
+  assert.ok((clean?.branch.length ?? 0) > 0);
+
+  await fs.writeFile(path.join(dir, "a.txt"), "x", "utf8");
+  await fs.writeFile(path.join(dir, "b.txt"), "y", "utf8");
+  const dirty = await readGitSnapshot(dir);
+  assert.equal(dirty?.dirty, true);
+  assert.equal(dirty?.dirtyFiles, 2);
+});
+
+// ----------------------------------------------------------------- 会话持久化
+
+test("sessions: save → load 往返还原会话树（含 compact 旧分支）", async () => {
+  const dir = await tempDir();
+  const state = createInitialState({
+    cwd: dir,
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  appendNode(state, { role: "user", content: "第一轮", timestamp: 0 });
+  appendNode(state, {
+    role: "assistant",
+    content: [{ type: "text", text: "好的" }],
+    model: "m",
+    stopReason: "stop",
+    usage: emptyUsage(),
+    timestamp: 0,
+  });
+  // compact 语义：建第二棵树的 Root，旧分支原样保留
+  addNodeAt(state, null, { role: "user", content: "[前文对话摘要]\n摘要内容", timestamp: 0 });
+  appendNode(state, { role: "user", content: "压缩后的新问题", timestamp: 0 });
+
+  const id = await saveSession(state, dir);
+  assert.match(id, /^s\d{8}_\d{6}_/);
+  assert.equal(state.sessionId, id);
+  assert.ok(await sessionFileExists(dir, id));
+
+  const fresh = createInitialState({
+    cwd: dir,
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  assert.equal(await loadSessionInto(fresh, dir, id), true);
+  assert.equal(fresh.sessionId, id);
+  assert.equal(fresh.rootId, state.rootId);
+  assert.equal(fresh.currentNodeId, state.currentNodeId);
+  assert.equal(fresh.nodes.size, state.nodes.size);
+  for (const [nodeId, node] of state.nodes) {
+    const restored = fresh.nodes.get(nodeId);
+    assert.ok(restored !== undefined, `节点 ${nodeId} 应还原`);
+    assert.equal(restored.parent, node.parent);
+    assert.deepEqual(restored.children, node.children);
+  }
+  // 线性视图从 ★ 重算：只含摘要 Root + 新问题，compact 旧分支不进来
+  assert.deepEqual(fresh.messages.map((m) => m.role), state.messages.map((m) => m.role));
+  assert.equal(fresh.messages.length, 2);
+  // 同一 state 再次保存落同一个文件
+  assert.equal(await saveSession(fresh, dir), id);
+});
+
+test("sessions: listSessions 按 savedAt 倒序，latestSessionId 取最新", async () => {
+  const dir = await tempDir();
+  const state = createInitialState({
+    cwd: dir,
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  const id1 = await saveSession(state, dir);
+  state.sessionId = undefined; // 绕过同 id 复用，强制第二个会话
+  await new Promise((r) => setTimeout(r, 5));
+  const id2 = await saveSession(state, dir);
+  assert.notEqual(id1, id2);
+
+  const list = await listSessions(dir);
+  assert.equal(list.length, 2);
+  assert.equal(list[0]?.id, id2, "新的在前");
+  assert.equal(await latestSessionId(dir), id2);
+});
+
+test("sessions: 载入不存在的 id / 损坏文件返回 false，state 不动", async () => {
+  const dir = await tempDir();
+  const state = createInitialState({
+    cwd: dir,
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  appendNode(state, { role: "user", content: "hi", timestamp: 0 });
+  const before = {
+    rootId: state.rootId,
+    current: state.currentNodeId,
+    count: state.nodes.size,
+    sessionId: state.sessionId,
+  };
+
+  assert.equal(await loadSessionInto(state, dir, "s_nothing"), false);
+  await fs.mkdir(sessionsDir(dir), { recursive: true });
+  await fs.writeFile(path.join(sessionsDir(dir), "s_bad.json"), "{not json", "utf8");
+  assert.equal(await loadSessionInto(state, dir, "s_bad"), false);
+
+  assert.equal(state.rootId, before.rootId);
+  assert.equal(state.currentNodeId, before.current);
+  assert.equal(state.nodes.size, before.count);
+  assert.equal(state.sessionId, before.sessionId);
+});
+
+test("sessions: Agent persistSessions 在 agent_end 后自动落盘", async () => {
+  const dir = await tempDir();
+  const state = createInitialState({
+    cwd: dir,
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  const agent = new Agent({
+    state,
+    stream: async function* () {
+      yield { type: "done", reason: "stop", message: textOnly("完成") };
+    },
+    persistSessions: true,
+  });
+  agent.enqueueUser("记一下");
+  await agent.run();
+
+  const list = await listSessions(dir);
+  assert.equal(list.length, 1);
+  assert.ok(list[0] !== undefined && state.sessionId === list[0].id);
+});
+
+async function main(): Promise<void> {
+  const { main: runMain } = await import("./registry.js");
+  await runMain();
 }
 
 const invokedDirectly = process.argv[1] !== undefined && process.argv[1].endsWith("run.ts");
