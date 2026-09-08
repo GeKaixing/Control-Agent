@@ -1,0 +1,8 @@
+{
+  "id": "browser-use",
+  "version": "0.1.0",
+  "type": "cli",
+  "description": "桥接官方 browser-use MCP server（https://github.com/browser-use/browser-use，uvx --from 'browser-use[cli]' browser-use --mcp，stdio）。暴露低层浏览器控制工具（navigate/click/type/get_state/screenshot/extract_content/tab 与 session 管理）+ autonomous 兜底工具。工具集随包版本变化，capabilities 留空由运行时 tools/list 决定。",
+  "capabilities": [],
+  "entry": "index"
+}

@@ -4,5 +4,5 @@
   "type": "cli",
   "description": "桥接官方 MCP 服务器 @modelcontextprotocol/server-sequential-thinking：sequentialthinking 工具，供模型做显式分步推理。MCP 工具集由运行时 tools/list 决定，capabilities 留空；只读不标记 mutating。",
   "capabilities": [],
-  "entry": "index.ts"
+  "entry": "index"
 }

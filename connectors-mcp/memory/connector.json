@@ -5,5 +5,5 @@
   "description": "桥接官方 MCP 服务器 @modelcontextprotocol/server-memory：知识图谱记忆（实体/关系/观察的增删查，create_entities / create_relations / add_observations / delete_* / read_graph / search_nodes / open_nodes）。MCP 工具集由运行时 tools/list 决定，capabilities 留空；写操作在桥接配置里标记 mutating 走审批门。",
   "permissions": ["filesystem.read", "filesystem.write"],
   "capabilities": [],
-  "entry": "index.ts"
+  "entry": "index"
 }

@@ -12,7 +12,7 @@
  * - mutating 工具名单由 manifest 配置给出（MCP 协议本身没有这个概念）
  */
 
-import { fail, ok, type Tool, type ToolContext, type ToolResult } from "../../src/tools/types.js";
+import { fail, type Tool, type ToolContext, type ToolResult } from "../../src/tools/types.js";
 import type { JsonSchema, JsonSchemaProperty } from "../../src/providers/types.js";
 import type { Connector, ConnectorClass, ConnectorContext } from "../../src/connector/core/types.js";
 import { McpStdioClient, type McpToolDef } from "./mcp-stdio-client.js";
@@ -86,6 +86,8 @@ export interface McpBridgeConfig {
   mutatingToolNames?: readonly string[];
   /** connect / tools/list 每步超时毫秒，默认 30s */
   connectTimeoutMs?: number;
+  /** 透传给 server 子进程的额外环境变量（进程环境已自动继承，这里只放增量） */
+  env?: Record<string, string>;
 }
 
 /**

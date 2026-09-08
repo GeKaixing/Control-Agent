@@ -5,6 +5,7 @@ dist/
 .DS_Store
 desktop/renderer-dist/
 desktop/native/dictate.app/
+desktop/native/dictate
 
 # 代理工作记忆（.workbuddy/memory/），属于本地笔记，不进版本库
 .workbuddy/
@@ -15,5 +16,7 @@ desktop/native/dictate.app/
 # bot 平台依赖的独立安装目录（wechaty 树大，独立装避免污染主 lockfile；
 # 通过 symlink 从主 node_modules 引用，见 src/bot/doc/README.md）
 /bot-deps/
+# browser-use connector 的持久 Python venv（见 connectors-mcp/browser-use/index.ts）
+/browser-use-venv/
 # wechaty 登录 cookies（wx.qq.com 会话凭据，绝不能进版本库）
 c-agent-wechat.memory-card.json
