@@ -20,8 +20,10 @@
  */
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, screen, shell, type IpcMainInvokeEvent } from "electron";
+import { existsSync } from "node:fs";
 import path from "node:path";
 
+import { ConnectorLoader } from "../../src/connector/loader/connector-loader.js";
 import { ConnectorRuntime } from "../../src/connector/runtime/connector-runtime.js";
 import { createDisplayRoute, type DisplayRoute } from "../../src/connector/runtime/display-route.js";
 import DesktopDisplayConnector from "../../src/connector/connectors/desktop-display/index.js";
@@ -50,6 +52,12 @@ let session: SessionManager | null = null;
 let dictation: DictationController | null = null;
 /** 消息显示的 connector runtime；「默认连接」的 desktop-display connector 也注册在这里 */
 let displayRuntime: ConnectorRuntime | null = null;
+/**
+ * 工具型 connector runtime（connectors-mcp：browser-use / mcp-memory / …）。
+ * 与 displayRuntime 职责分离：那边只接收事件流（DisplaySink），这边把 connector
+ * 的 extraTools 暴露给 Agent。在 bootstrap 里 assembleSession 之前装配。
+ */
+let toolRuntime: ConnectorRuntime | null = null;
 /** 菜单弹层子窗口（无边框小窗浮在触发按钮下方；主窗口高度因此不变） */
 let popoverWin: BrowserWindow | null = null;
 let popoverId: string | null = null;
@@ -654,9 +662,42 @@ async function bootstrap(deps: StartDeps): Promise<void> {
   const savedModelSpec = modelEnvSet ? null : await readSavedModelSpec(desktopCwd);
   const savedCustomModel =
     modelEnvSet || savedModelSpec !== null ? null : await readSavedCustomModel(desktopCwd);
+
+  // 工具型 connector：扫描编译产物里的 connectors-mcp（Loader 会动态 import 编译后的
+  // .js；源码 .ts 只有 tsx 运行时能加载，Electron main 里不行），start 后把
+  // extraTools 喂给 assembleSession。单个 connector start 失败不阻断启动——
+  // 跳过它的工具，console 留痕（与 CLI --connectors 行为一致）。
+  // deps.__dirname 是 entry.mjs 所在目录（desktop/main），编译产物在
+  // dist/<仓库目录名>/connectors-mcp（rootDir 'g' 布局）。必须扫 dist——
+  // Loader 动态 import 的是编译后 .js，源码 .ts 在 Electron main 里加载不了
+  // （tsx 运行时才行），扫到源码目录只会刷一屏 "Cannot find module .../index.ts"。
+  toolRuntime = new ConnectorRuntime({ cwd: desktopCwd });
+  const connectorDirs = [
+    path.resolve(deps.__dirname, "dist/g/connectors-mcp"),
+    path.resolve(deps.__dirname, "dist/connectors-mcp"),
+  ];
+  const connectorsDir = connectorDirs.find((p) => existsSync(p));
+  let connectorTools: ReturnType<ConnectorRuntime["extraTools"]> = [];
+  if (connectorsDir !== undefined) {
+    const { loaded, failed } = await new ConnectorLoader({ paths: [connectorsDir] }).scan();
+    for (const f of failed) {
+      console.warn(`[connectors] load failed: ${f.rootDir} -> ${f.error}`);
+    }
+    for (const c of loaded) toolRuntime.adopt(c);
+    const startFailed = await toolRuntime.start();
+    if (startFailed.length > 0) {
+      console.warn(`[connectors] start failed: ${startFailed.join(", ")}`);
+    }
+    connectorTools = toolRuntime.extraTools();
+    console.log(
+      `[connectors] ready: ${connectorTools.length} tools from ${loaded.length} connector(s) (${connectorsDir})`,
+    );
+  }
+
   const assembled = await assembleSession({
     cwd: desktopCwd,
     ...(savedModelSpec !== null ? { modelSpec: savedModelSpec } : {}),
+    ...(connectorTools.length > 0 ? { extraTools: connectorTools } : {}),
   });
   // 消息显示通路：SessionManager emit → connector 路由 → desktop-display（默认连接）
   // → Electron IPC → 渲染层。Composer 的提交类 IPC（SUBMIT/STEER/…）不经过 connector。
@@ -732,9 +773,11 @@ async function bootstrap(deps: StartDeps): Promise<void> {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
-    // 显示 connector 里的节流 timer 需要释放
+    // 显示 connector 里的节流 timer 需要释放；工具型 connector 的 MCP 子进程同样
     void displayRuntime?.dispose();
     displayRuntime = null;
+    void toolRuntime?.dispose();
+    toolRuntime = null;
   }
   // darwin：app 常驻（tray-status 菜单栏输出还在跑），窗口由 activate / tray 菜单重建。
   // 此前 darwin 也会落到下面的 dispose，导致关窗即拆掉整条显示通路

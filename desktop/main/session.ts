@@ -39,6 +39,7 @@ import {
   lookupKnownContextWindow,
   type ResolvedModel,
 } from "../../src/providers/index.js";
+import type { AgentState } from "../../src/context/state.js";
 import { resolveModel } from "../../src/providers/index.js";
 import { BASE_URL_PRESETS } from "../../src/providers/vendors.js";
 import { allTools } from "../../src/tools/index.js";
@@ -55,7 +56,6 @@ import type {
   ReasoningLevel,
   EndpointId,
   ToolsByCategory,
-  ToolCategory,
   ToolEntry,
   Attachment,
   ContextBreakdown,
@@ -331,18 +331,15 @@ function modelsUrlForBaseUrl(provider: string, baseUrl: string): string {
   return provider === "anthropic" ? `${base}/v1/models` : `${base}/models`;
 }
 
-const ALL_CATEGORIES: ToolCategory[] = ["skill", "tool", "mcp", "plugin", "extension"];
-
 /**
  * 扫描当前可用工具并按来源分组。
- * v1 实情：只有 `tool`（来自 src/tools/index.ts 的核心工具）真有数据；
- * 其他分组保留为空数组，是「面板分组骨架」——以后 skill/mcp/plugin/extension
- * 真接进来时只需往这里填，不需要改前端。
+ * `tool` = src/tools/index.ts 的核心内置工具；`mcp` = Connector Runtime 注入的
+ * extraTools（browser-use / mcp-memory 等，判定与 contextBreakdown 同口径：
+ * 不在 allTools 内置表里即连接器工具）。skill / plugin / extension 仍是分组骨架。
  *
- * mode=answer_only 时把 answer_only 专用的空数组报回去——但渲染层用 name 列表，
- * 实际不影响。保留全表主要是给前端面板用。
+ * mode=answer_only 时 state.tools 为空，两个分组自然都空，无需特判。
  */
-function listToolsByCategory(): ToolsByCategory {
+function listToolsByCategory(state: AgentState): ToolsByCategory {
   const out: ToolsByCategory = {
     skill: [],
     tool: [],
@@ -350,16 +347,24 @@ function listToolsByCategory(): ToolsByCategory {
     plugin: [],
     extension: [],
   };
-  for (const t of allTools) {
-    out.tool.push({
-      name: t.name,
-      description: t.description,
-      category: "tool",
-      source: `core:src/tools/${t.name}.ts`,
-    });
+  const builtinNames = new Set(allTools.map((t) => t.name));
+  for (const t of state.tools) {
+    if (builtinNames.has(t.name)) {
+      out.tool.push({
+        name: t.name,
+        description: t.description,
+        category: "tool",
+        source: `core:src/tools/${t.name}.ts`,
+      });
+    } else {
+      out.mcp.push({
+        name: t.name,
+        description: t.description,
+        category: "mcp",
+        source: "connector",
+      });
+    }
   }
-  // 防 lint：ALL_CATEGORIES 只是给 reader 看的"目前只填了 tool"
-  void ALL_CATEGORIES;
   return out;
 }
 
@@ -574,7 +579,7 @@ export class SessionManager {
       msgWindow: this.msgWindow,
       sessionTitle: this.sessionTitles[this.sessionIdx] ?? "新会话",
       lastUserPrompt: this.lastUserPrompt(),
-      toolsByCategory: listToolsByCategory(),
+      toolsByCategory: listToolsByCategory(this.state),
       contextBreakdown: this.contextBreakdown(),
       baseUrlPresets: BASE_URL_PRESETS.map((p) => ({
         label: p.label,

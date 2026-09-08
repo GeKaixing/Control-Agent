@@ -15,7 +15,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx tests/run.ts",
     "typecheck:desktop": "tsc -p desktop/tsconfig.main.json --noEmit && tsc -p desktop/tsconfig.renderer.json --noEmit",
-    "desktop:build:main": "tsc -p desktop/tsconfig.main.json && npm run desktop:main:write-cjs-pkg",
+    "desktop:build:main": "tsc -p desktop/tsconfig.main.json && npm run desktop:main:write-cjs-pkg && node scripts/desktop-connector-dist.cjs",
     "desktop:build:renderer": "vite build --config desktop/vite.config.ts",
     "desktop:build": "npm run desktop:build:main && npm run desktop:build:renderer",
     "desktop:dev": "npm run desktop:ensure-mic-plist && npm run desktop:build:main && concurrently -k -n vite,electron \"vite --config desktop/vite.config.ts\" \"wait-on http-get://127.0.0.1:5173 && electron .\"",
@@ -25,6 +25,9 @@
     "bot:weixin": "tsx src/bot/weixin.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/server-everything": "^2026.8.31",
+    "@modelcontextprotocol/server-memory": "^2026.8.31",
+    "@modelcontextprotocol/server-sequential-thinking": "^2026.8.31",
     "@radix-ui/react-scroll-area": "^1.2.18",
     "@radix-ui/react-separator": "^1.1.0",
     "@radix-ui/react-slot": "^1.1.0",
