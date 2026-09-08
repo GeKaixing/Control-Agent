@@ -99,30 +99,43 @@ export function toOpenAiMessages(systemPrompt: string, messages: LlmMessage[]): 
     }
 
     // toolResult：OpenAI 要求每个工具调用一条独立的 role=tool 消息。
-    // 图片块转成 image_url part；纯文本保持字符串（最大端点兼容性）。
+    // 图片块不能放进 role=tool：官方 API 不支持，且多数兼容上游直接 400
+    // （实测 opencode zen 的 mimo-v2.5：tool 带图 → "Upstream request failed:
+    // [400]"；同图放 user 消息 → 200）。降级策略：图片提取出来，紧随该 tool
+    // 消息之后以 user 消息承载；tool 消息只留文本。
     for (const c of m.content) {
       if (c.type !== "toolResult") continue;
       const tr = c as {
         toolCallId: string;
         content: { type: string; text: string; dataUrl?: string }[];
       };
-      const parts: unknown[] = [];
+      const textParts: unknown[] = [];
+      const imageParts: unknown[] = [];
       for (const x of tr.content) {
         if (x.type === "image" && typeof x.dataUrl === "string") {
-          parts.push({ type: "image_url", image_url: { url: x.dataUrl } });
+          imageParts.push({ type: "image_url", image_url: { url: x.dataUrl } });
         } else if (x.type === "text") {
-          parts.push({ type: "text", text: x.text });
+          textParts.push({ type: "text", text: x.text });
         }
       }
       const content =
-        parts.length === 1 && (parts[0] as { type: string }).type === "text"
-          ? (parts[0] as { text: string }).text
-          : parts;
+        textParts.length === 1 && (textParts[0] as { type: string }).type === "text"
+          ? (textParts[0] as { text: string }).text
+          : textParts;
       out.push({
         role: "tool",
         tool_call_id: tr.toolCallId,
         content,
       });
+      if (imageParts.length > 0) {
+        out.push({
+          role: "user",
+          content: [
+            { type: "text", text: "（上一条工具结果附带的截图，坐标以图片左上角为原点）" },
+            ...imageParts,
+          ],
+        });
+      }
     }
   }
 
