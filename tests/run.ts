@@ -44,6 +44,7 @@ import {
   transformContext,
 } from "../src/context/index.js";
 import { convertToLlm } from "../src/agent/convert.js";
+import { mapMacHotkey } from "../src/tools/darwin-cu.js";
 import { toOpenAiMessages } from "../src/providers/openai.js";
 import { createMockStream } from "../src/providers/mock.js";
 import {
@@ -3648,6 +3649,23 @@ test("config: modelSpecString 生成可回放的 spec（含 maturity），parseM
 
 // ------------------------------------------------------- computer use 通道
 
+test("mapMacHotkey：修饰键+触发键 → kVK 键码 + CGEventFlags 掩码；非法输入 fail", () => {
+  // ctrl c：ctrl=59（kVK_Control），c=8（kVK_ANSI_C），flags = kCGEventFlagMaskControl
+  assert.deepEqual(mapMacHotkey("ctrl c"), { codes: [59, 8], flags: 1 << 18 });
+  // cmd shift 3：cmd=55，shift=56，3=20；flags = command|shift
+  assert.deepEqual(mapMacHotkey("cmd shift 3"), {
+    codes: [55, 56, 20],
+    flags: (1 << 20) | (1 << 17),
+  });
+  // 纯修饰键（无触发键）、空串、未知键名、超 3 键 → null
+  assert.equal(mapMacHotkey("ctrl"), null);
+  assert.equal(mapMacHotkey(""), null);
+  assert.equal(mapMacHotkey("ctrl foo"), null);
+  assert.equal(mapMacHotkey("a b c d"), null);
+  // 字母键码非字母序（macOS kVK 表）：s=1、z=6、v=9
+  assert.deepEqual(mapMacHotkey("alt v"), { codes: [58, 9], flags: 1 << 19 });
+});
+
 test("toolResult 图片块：convertToLlm 保留 screenshot 的图，openai 适配器转 image_url", () => {
   const dataUrl = "data:image/jpeg;base64,QUJD";
   const llm = convertToLlm([
@@ -3670,14 +3688,28 @@ test("toolResult 图片块：convertToLlm 保留 screenshot 的图，openai 适�
     "图片块应随 toolResult 一起进模型上下文");
 
   const openai = toOpenAiMessages("sys", llm);
+  // role=tool 消息只留文本；图片降级为紧随其后的 user 消息
+  // （兼容上游拒 tool 消息带图：mimo-v2.5 实测 400，官方 API 同样不支持）
   const toolMsg = openai.find((m) => (m as { role?: string }).role === "tool") as
-    | { content: Array<{ type: string; image_url?: { url: string } }> }
+    | { content: string | Array<{ type: string; image_url?: { url: string } }> }
     | undefined;
   assert.ok(toolMsg);
+  const toolHasImage =
+    typeof toolMsg.content !== "string" &&
+    toolMsg.content.some((p) => p.type === "image_url");
+  assert.equal(toolHasImage, false, "role=tool 消息不应携带 image_url part");
+  assert.equal(typeof toolMsg.content === "string" && toolMsg.content.includes("屏幕截图"), true,
+    "tool 消息应保留文本部分");
+
+  const afterTool = openai[openai.indexOf(toolMsg) + 1] as {
+    role?: string;
+    content?: Array<{ type: string; image_url?: { url: string } }>;
+  };
+  assert.equal(afterTool?.role, "user", "图片应作为 tool 消息之后的 user 消息注入");
   assert.equal(
-    toolMsg.content.some((p) => p.type === "image_url" && p.image_url?.url === dataUrl),
+    afterTool.content?.some((p) => p.type === "image_url" && p.image_url?.url === dataUrl),
     true,
-    "role=tool 消息应携带 image_url part",
+    "user 消息应携带原图 image_url part",
   );
 });
 

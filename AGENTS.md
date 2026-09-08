@@ -3,21 +3,29 @@
 给编码代理看的仓库约定。动手改代码前先读完，能省掉大部分返工。
 
 ## Computer Use
-
 如果特斯拉可以使用视觉方案实现自动驾驶，那么Computer Use也可以使用视觉方案实现自动操作电脑。
-
+1. 寻找时候有mcp cli api skill 等开源的方式可以操作应用 
+2. 寻找是否有浏览器端可以使用Browser Use可以去操作
+3. 使用 Computer Use操作应用
 这条愿景的落地形态是**一条独立的工具通道**，不是替换现有工具：
 
 - **分层原则**：文本通道优先（read/write/edit/bash 等——token 便宜、可回滚、可检索）；
   视觉通道兜底，只在「没有文本入口的场景」启用：桌面 GUI 应用、无 CLI 的软件、
   用户要求"帮我点这里/自动操作这个软件"。UI-TARS-2 技术报告同样把「纯 GUI 不够用、
   要接文件系统和终端」列为核心设计——两条通道是互补，不是二选一。
-- **感知端 `screenshot`**（只读）：截取整个虚拟屏，返回 JPEG 图片 + 尺寸。
+- **感知端 `screenshot`**（只读）：截屏返回 JPEG 图片 + 尺寸。
   坐标语义：模型看到的截图左上角为 `(0,0)`，harness 不做任何坐标换算。
 - **执行端 `computer`**（mutating）：click / doubleClick / rightClick / type / hotkey /
-  scroll 六个动作，坐标必须来自最近一次 screenshot。内部把图片坐标加上虚拟屏原点
-  换算成物理像素，两端 `SetProcessDPIAware` 保证高 DPI 一致。
-  两者都是 Windows 实现（PowerShell，零 npm 依赖）。
+  scroll 六个动作，坐标必须来自最近一次 screenshot。两端实现均零 npm 依赖：
+  - Windows：PowerShell + System.Drawing / user32 P/Invoke；截多显示器并集，
+    图片坐标加虚拟屏原点换算成物理像素，`SetProcessDPIAware` 保证高 DPI 一致。
+  - macOS（`src/tools/darwin-cu.ts`）：`screencapture` 截主显示器 + `osascript`
+    JXA ObjC bridge 发 CGEvent。Retina 截图在 screenshot 端就降采样到逻辑点尺寸，
+    图片像素 == CGEvent 全局坐标，执行端零换算。MVP 只覆盖主显示器。
+    需要 TCC 权限：屏幕录制（screencapture 无权限 exit≠0）+ 辅助功能
+    （CGEventPost 被静默丢弃）——缺权限时工具 fail 并给出「系统设置」路径，
+    绝不静默降级（JXA 直截 CGDisplayCreateImage 无权限会拿到只有壁纸的图，
+    有意不用这条路截屏，只用 screencapture 的退出码当权限探测）。
 - **Permission**：`computer` 改变真实桌面状态且**没有 git 回滚**——桌面端必须过
   `approvalGate`；CLI 无审批门，靠动作留痕 + 屏幕变化可见兜底。这是五支柱里
   「不可逆操作过人」的直接案例，不要为了"流畅"给它开后门。
@@ -140,8 +148,9 @@ g/
 │   │   ├── glob.ts               走 fs-utils 的 walk
 │   │   ├── grep.ts               ripgrep 后端
 │   │   ├── memory.ts             跨会话记忆（追加式存储，写入项目根 MEMORY.md）
-│   │   ├── screenshot.ts         Computer Use 感知端：截屏 → JPEG（Windows）
-│   │   ├── computer.ts           Computer Use 执行端：鼠标/键盘/滚轮（Windows）
+│   │   ├── darwin-cu.ts          macOS Computer Use 后端：screencapture + JXA/CGEvent
+│   │   ├── screenshot.ts         Computer Use 感知端：截屏 → JPEG（Windows/macOS）
+│   │   ├── computer.ts           Computer Use 执行端：鼠标/键盘/滚轮（Windows/macOS）
 │   │   ├── index.ts              TOOL_REGISTRY + ToolName 派生源
 │   │   └── doc/                  子模块文档（README.md）
 │   ├── ui/                     终端交互
