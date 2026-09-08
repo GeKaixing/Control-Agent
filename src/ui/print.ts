@@ -16,7 +16,11 @@ export interface PrintOutput {
   readonly answer: string;
   /** 需要提示但不算失败的信息，如上下文裁剪、循环上限 */
   readonly warnings: string[];
-  /** 真正的失败：模型报错、调用异常 */
+  /**
+   * 真正的失败：模型报错、调用异常。同文去重；本轮流错误若被自动重试恢复
+   * （turn_end 干净收尾），不计入失败——重试是 agent 内部的事，不该让调用方
+   * 把成功的一轮当失败。
+   */
   readonly errors: string[];
   /** 有错为 1，否则 0 */
   readonly exitCode: number;
@@ -29,7 +33,10 @@ export function createPrintOutput(): PrintOutput {
 
   function pushError(message: string): void {
     const trimmed = message.trim();
-    if (trimmed.length > 0) errors.push(trimmed);
+    if (trimmed.length === 0) return;
+    // 同文去重：流错误事件 + turn_end errorMessage 是同一次失败的两面
+    if (errors[errors.length - 1] === trimmed) return;
+    errors.push(trimmed);
   }
 
   return {
@@ -47,8 +54,12 @@ export function createPrintOutput(): PrintOutput {
 
         case "turn_end": {
           // 中断、调用失败等情况会在消息上带 errorMessage
-          if (event.message.errorMessage !== undefined) {
-            pushError(event.message.errorMessage);
+          const err = event.message.errorMessage?.trim();
+          if (err !== undefined && err.length > 0) {
+            pushError(err);
+          } else {
+            // 干净收尾：本轮中途的流错误已被自动重试恢复，不算最终失败
+            errors.length = 0;
           }
           break;
         }

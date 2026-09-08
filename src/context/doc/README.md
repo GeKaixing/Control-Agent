@@ -170,7 +170,10 @@ class MessageQueue {
   就被推进了。判断「有没有活干」应该读 ★ 节点（或 messages 末位）消息的 `role`
   （`agent.ts:hasPendingWork`）。
 
-## 会话持久化（sessions.ts）
+## 持久化（sessions.ts）：会话树 + 用户配置
+
+`.c-agent/` 目录的落盘只有这一个出口，一套纪律（原子写 tmp + rename、version
+字段校验、坏文件静默回退），不另设第二套持久化。
 
 会话树（`AgentState.nodes`）可整体 JSON 序列化——每条消息是带 parent/children
 指针的节点，`saveSession` 原子写（tmp + rename）到 `.c-agent/sessions/<id>.json`，
@@ -180,6 +183,15 @@ class MessageQueue {
 - **自动保存**：`AgentOptions.persistSessions`（默认 false）→ 每次 `agent_end`
   后落盘，同一 state 复用同一个会话 id；CLI 交互模式已开启。
 - **恢复**：CLI `--resume [id]`（省略 id 取最近一次）；REPL `/sessions` 列清单。
+- **用户配置**（config.json）：`/model`（CLI）或桌面端的模型切换经 `saveModelSpec` 存
+  `.c-agent/config.json`（`readSavedModelSpec` 读回），启动时按 `--model` 参数（仅 CLI）>
+  `MODEL` env > 持久值 > 内置默认取用；`--model` 是一次性覆盖不落盘。存可回放的
+  spec 字符串（`modelSpecString`），不存解析后的 ModelRef。**自定义模型**是另一条
+  通道：完整参数（provider/id/baseUrl/apiKey/contextWindow）经 `saveCustomModel`
+  存同一文件（`readSavedCustomModel` 读回，CLI 用 `assembleSession({ modelRef })`
+  恢复、桌面端走 `setCustomModel` 复原）——baseUrl/apiKey 编码不进 spec，所以
+  存对象不存字符串。spec 与 customModel 互斥（写入方清掉另一种），最后一次的
+  选择是唯一真相。
 - 与 memory 工具的分工：项目根 `MEMORY.md` 是模型自己记的「跨会话有效事实」，
   注入系统提示词；sessions 是完整对话历史，只在恢复时整体读回，不注入。
 - 不做的事：不摘要、不清洗、不做保留期——哪些内容值得留是 transformContext

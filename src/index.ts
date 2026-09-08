@@ -5,11 +5,19 @@
 
 import path from "node:path";
 import { Agent, type AgentEvent } from "./agent/agent.js";
-import { latestSessionId, loadSessionInto } from "./context/index.js";
+import {
+  latestSessionId,
+  loadSessionInto,
+  modelSpecString,
+  readSavedCustomModel,
+  readSavedModelSpec,
+  saveModelSpec,
+} from "./context/index.js";
 import { ConnectorLoader } from "./connector/loader/connector-loader.js";
 import { ConnectorRuntime } from "./connector/runtime/connector-runtime.js";
 import type { StreamFn } from "./providers/types.js";
 import { assembleSession, buildSeedMessages, resolveModelSpec } from "./session.js";
+import type { ModelRef } from "./types.js";
 import { InputController } from "./ui/input.js";
 import { createPrintOutput, readStdin } from "./ui/print.js";
 import { renderMarkdown } from "./ui/markdown.js";
@@ -20,6 +28,7 @@ const HELP = [
   "命令：",
   "  /help              显示本帮助",
   "  /model <provider:id>   切换模型，如 /model openai:gpt-4o-mini、/model anthropic:claude-3-7-sonnet-latest",
+  "                      切换会持久保存到 .c-agent/config.json，下次启动默认沿用",
   "  /tools             列出可用工具",
   "  /usage             显示本次会话的 token 用量",
   "  /clear             清空对话历史",
@@ -51,6 +60,11 @@ const HELP = [
   "会话持久化：",
   "  --resume [id]                恢复已持久化的会话（含 compact 旧分支）；",
   "                            省略 id 时恢复最近一次。交互模式每轮结束自动保存。",
+  "",
+  "模型持久化：",
+  "  启动时模型来源优先级：--model 参数 > MODEL 环境变量 > .c-agent/config.json",
+  "  保存值 > 内置默认。--model 是一次性覆盖，不写入配置；想改默认用 /model 切换，",
+  "  想清掉持久值就删 .c-agent/config.json。",
   "",
   "输出渲染：",
   "  --no-markdown                原样输出 Markdown 源码，不做终端渲染",
@@ -233,9 +247,36 @@ async function main(): Promise<number> {
   const connectorRuntime = new ConnectorRuntime({ cwd });
   const connectorSummary = await bootstrapConnectors(connectorRuntime, args.connectorsPaths);
 
+  // 模型来源优先级：--model 参数 > MODEL env（defaultModel 内处理）> .c-agent/config.json
+  // 持久值 > 内置默认。持久值由 REPL /model 切换或桌面端选模型时写入（spec 与
+  // 自定义模型完整参数互斥，最后一次的选择是唯一真相），让选择跨进程生效；
+  // --model 是一次性覆盖，不落盘（脚本里 --model mock 不该污染用户配置）。
+  let modelSpec: string | undefined = args.model;
+  let customRef: ModelRef | undefined;
+  if (modelSpec === undefined && process.env.MODEL === undefined) {
+    const saved = await readSavedModelSpec(cwd);
+    if (saved !== null) {
+      modelSpec = saved;
+      console.error(`提示：模型沿用持久配置 ${saved}（.c-agent/config.json，--model / MODEL env 可覆盖）`);
+    } else {
+      // 最后一次选的是自定义模型（完整参数自描述，CLI 同样恢复）
+      const custom = await readSavedCustomModel(cwd);
+      if (custom !== null) {
+        customRef = {
+          provider: custom.provider as ModelRef["provider"],
+          id: custom.id,
+          baseUrl: custom.baseUrl,
+          apiKey: custom.apiKey,
+          ...(custom.contextWindow !== undefined ? { contextWindow: custom.contextWindow } : {}),
+        };
+        console.error(`提示：模型沿用持久配置（自定义模型 ${custom.id}，.c-agent/config.json）`);
+      }
+    }
+  }
+
   const assembled = await assembleSession({
     cwd,
-    modelSpec: args.model,
+    ...(modelSpec !== undefined ? { modelSpec } : customRef !== undefined ? { modelRef: customRef } : {}),
     ...(args.systemPrompt !== null ? { systemPrompt: args.systemPrompt } : {}),
     ...(args.appendSystemPrompt !== null ? { appendSystemPrompt: args.appendSystemPrompt } : {}),
     ...(seedResult.seeds.length > 0 ? { seedMessages: seedResult.seeds } : {}),
@@ -336,6 +377,14 @@ async function main(): Promise<number> {
       },
       resolveNewModel: (spec) => {
         const { resolved: newResolved } = resolveModelSpec(spec);
+        // /model 切换即持久化：下次启动默认沿用（--model / MODEL env 仍可临时覆盖）。
+        // 写失败不阻断切换，stderr 提示即可。
+        const specToSave = modelSpecString(newResolved.model);
+        void saveModelSpec(cwd, specToSave).catch((err: unknown) => {
+          console.error(
+            `提示：模型配置保存失败（${specToSave}）：${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
         // 复用同一个变量存回去；调用方拿到的是新 model + stream
         resolved = newResolved;
         stream = newResolved.stream;

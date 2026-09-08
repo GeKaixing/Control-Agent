@@ -1,5 +1,5 @@
 /**
- * Context 支柱：会话持久化。
+ * Context 支柱：.c-agent/ 目录的单一持久化出口（会话树 + 用户配置），一套纪律。
  *
  * 之前会话树纯内存（AgentState.nodes），进程退出即消失——这是 v1 的刻意边界，
  * 本模块把它补上：树结构天然可 JSON 序列化，存取即可，不摘要不清洗
@@ -7,6 +7,8 @@
  *
  * 存储：<cwd>/.c-agent/sessions/<id>.json。会话 id 带时间戳前缀，
  * 文件名即时间线；原子写（tmp + rename），崩溃最多丢当前轮。
+ * 用户配置存 <cwd>/.c-agent/config.json（目前只有 /model 选过的模型），
+ * 复用同一套原子写 / 版本校验 / 坏文件静默回退，不另起第二套持久化。
  *
  * 与 memory 工具（项目根 MEMORY.md）的分工：MEMORY.md 是模型自己决定记的
  * 「跨会话有效的事实」，注入系统提示词；sessions 是完整的对话历史（含分支、
@@ -16,6 +18,7 @@
 import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { activeBranch, type AgentState, type MessageNode } from "./state.js";
+import type { ModelRef } from "../types.js";
 
 /** 会话文件目录（相对 cwd）；记忆文件在项目根，会话历史仍是隐藏运行时状态 */
 export const SESSIONS_DIR = path.join(".c-agent", "sessions");
@@ -160,4 +163,132 @@ export async function sessionFileExists(cwd: string, id: string): Promise<boolea
   } catch {
     return false;
   }
+}
+
+// ────────────── 用户配置（.c-agent/config.json） ──────────────
+
+const CONFIG_VERSION = 1;
+
+/**
+ * 自定义模型持久值：完整参数自描述（baseUrl/apiKey 无法从 spec 字符串回放，
+ * 所以自定义模型存对象不存 spec）。重启后据此直接重建 ModelRef。
+ * apiKey 明文落盘——与 .env 放 key 同级风险，.c-agent/ 本就是本地明文目录。
+ */
+export interface StoredCustomModel {
+  /** 协议（ModelRef.provider 原样）：openai / openai-responses / anthropic / gemini */
+  provider: string;
+  /** 模型 id */
+  id: string;
+  /** 接口地址（归一后的真值：anthropic 根路径、无尾斜杠） */
+  baseUrl: string;
+  /** API KEY；"EMPTY" 是桌面端留空占位（本地端点约定） */
+  apiKey: string;
+  /** 上下文窗口覆写；缺省自动识别 */
+  contextWindow?: number;
+}
+
+interface StoredConfig {
+  version: number;
+  /** 上次选定的模型 spec（"provider:id[:strong|budget]"） */
+  model?: string;
+  /** 上次选定的自定义模型完整参数；与 model 互斥——最后一次的选择是唯一真相 */
+  customModel?: StoredCustomModel;
+  updatedAt?: number;
+}
+
+/** config.json 的绝对路径（与 sessions 同在 .c-agent/，同一套落盘纪律） */
+export function configPath(cwd: string): string {
+  return path.join(cwd, ".c-agent", "config.json");
+}
+
+async function readConfig(cwd: string): Promise<StoredConfig | null> {
+  let raw: string;
+  try {
+    raw = await readFile(configPath(cwd), "utf8");
+  } catch {
+    return null;
+  }
+  try {
+    const data = JSON.parse(raw) as StoredConfig;
+    return data.version === CONFIG_VERSION ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 读取持久化的模型 spec。文件不存在 / JSON 损坏 / 版本不识别 / model 字段缺失
+ * 或空白 → null（调用方回退到 MODEL env / 内置默认），不打日志不抛错。
+ */
+export async function readSavedModelSpec(cwd: string): Promise<string | null> {
+  const data = await readConfig(cwd);
+  if (data === null || typeof data.model !== "string") return null;
+  const spec = data.model.trim();
+  return spec.length > 0 ? spec : null;
+}
+
+/**
+ * 读取持久化的自定义模型完整参数。字段不完整（provider/id/baseUrl 非空字符串、
+ * apiKey 字符串）视为损坏返回 null，调用方回退内置默认。
+ */
+export async function readSavedCustomModel(cwd: string): Promise<StoredCustomModel | null> {
+  const data = await readConfig(cwd);
+  const c = data?.customModel;
+  if (
+    c === undefined ||
+    typeof c.provider !== "string" || c.provider.length === 0 ||
+    typeof c.id !== "string" || c.id.length === 0 ||
+    typeof c.baseUrl !== "string" || c.baseUrl.length === 0 ||
+    typeof c.apiKey !== "string"
+  ) {
+    return null;
+  }
+  return {
+    provider: c.provider,
+    id: c.id,
+    baseUrl: c.baseUrl,
+    apiKey: c.apiKey,
+    ...(typeof c.contextWindow === "number" && c.contextWindow > 0
+      ? { contextWindow: c.contextWindow }
+      : {}),
+  };
+}
+
+async function writeConfig(cwd: string, stored: StoredConfig): Promise<void> {
+  await mkdir(path.join(cwd, ".c-agent"), { recursive: true });
+  const file = configPath(cwd);
+  const tmp = `${file}.tmp`;
+  await writeFile(tmp, JSON.stringify(stored), "utf8");
+  await rename(tmp, file);
+}
+
+/**
+ * 原子写入模型 spec（tmp + rename，与 saveSession 同款）。写入失败会抛出，
+ * 由调用方决定怎么提示——配置存不上不该打断「切换模型」本身。
+ * 互斥：写 spec 清掉 customModel（最后一次的选择是唯一真相）。
+ */
+export async function saveModelSpec(cwd: string, spec: string): Promise<void> {
+  await writeConfig(cwd, {
+    version: CONFIG_VERSION,
+    model: spec,
+    updatedAt: Date.now(),
+  });
+}
+
+/**
+ * 原子写入自定义模型完整参数。互斥：写 customModel 清掉 model spec。
+ * 恢复路径也会回写（幂等同值），无害。
+ */
+export async function saveCustomModel(cwd: string, custom: StoredCustomModel): Promise<void> {
+  await writeConfig(cwd, {
+    version: CONFIG_VERSION,
+    customModel: custom,
+    updatedAt: Date.now(),
+  });
+}
+
+/** ModelRef → 可回放的 spec 字符串；config.json 存这个而不是用户原始输入 */
+export function modelSpecString(model: ModelRef): string {
+  const maturity = model.maturity !== undefined ? `:${model.maturity}` : "";
+  return `${model.provider}:${model.id}${maturity}`;
 }

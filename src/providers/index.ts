@@ -8,11 +8,19 @@ import { anthropicDefaultModel, anthropicStream } from "./anthropic.js";
 import { geminiDefaultModel, geminiStream } from "./gemini.js";
 import { createMockStream, mockDefaultModel } from "./mock.js";
 import { openaiDefaultModel, openaiStream } from "./openai.js";
-import { lookupContextWindow, lookupVendor, VENDOR_PRESETS } from "./vendors.js";
+import { responsesDefaultModel, responsesStream } from "./responses.js";
+import {
+  lookupContextWindow,
+  lookupKnownContextWindow,
+  lookupVendor,
+  VENDOR_PRESETS,
+} from "./vendors.js";
 import type { Provider, StreamFn } from "./types.js";
 
 const providers: Record<ProviderId, () => Provider> = {
   openai: () => ({ id: "openai", stream: openaiStream }),
+  // OpenAI 新一代 Responses API（/v1/responses），与 chat 版 key/baseUrl 同源
+  "openai-responses": () => ({ id: "openai-responses", stream: responsesStream }),
   anthropic: () => ({ id: "anthropic", stream: anthropicStream }),
   gemini: () => ({ id: "gemini", stream: geminiStream }),
   mock: () => ({ id: "mock", stream: createMockStream() }),
@@ -22,6 +30,8 @@ const providers: Record<ProviderId, () => Provider> = {
   zhipu: () => ({ id: "zhipu", stream: openaiStream }),
   dashscope: () => ({ id: "dashscope", stream: openaiStream }),
   openrouter: () => ({ id: "openrouter", stream: openaiStream }),
+  opencode: () => ({ id: "opencode", stream: openaiStream }),
+  "opencode-go": () => ({ id: "opencode-go", stream: openaiStream }),
   ollama: () => ({ id: "ollama", stream: openaiStream }),
 };
 
@@ -40,10 +50,14 @@ export function resolveModel(model: ModelRef): ResolvedModel {
   const withWindow: ModelRef =
     model.contextWindow !== undefined ? model : { ...model, contextWindow: lookupContextWindow(model.id) };
   if (model.provider !== "mock" && !hasKey) {
+    // 缺 key 提示取预设表里的真实 env 名（VENDOR_PRESETS 是单一真相源），不从
+    // provider id 推导——id 带 "-" 时（opencode-go）推导会拼出不存在的 env 名
+    const vendor = VENDOR_PRESETS.find((v) => v.id === model.provider);
+    const envName = vendor !== undefined ? vendor.apiKeyEnv : `${model.provider.toUpperCase()}_API_KEY`;
     return {
       model: withWindow,
       stream: providers["mock"]().stream,
-      degraded: `未配置 ${model.provider.toUpperCase()}_API_KEY，已降级为 mock 模型`,
+      degraded: `未配置 ${envName}，已降级为 mock 模型`,
     };
   }
   return { model: withWindow, stream: providers[model.provider]().stream };
@@ -80,6 +94,13 @@ export function parseModelSpec(spec: string): ModelRef {
     return {
       ...openaiDefaultModel(),
       id: modelId.length > 0 ? modelId : openaiDefaultModel().id,
+      maturity,
+    };
+  }
+  if (provider === "openai-responses") {
+    return {
+      ...responsesDefaultModel(),
+      id: modelId.length > 0 ? modelId : responsesDefaultModel().id,
       maturity,
     };
   }
@@ -140,14 +161,17 @@ function stripMaturitySuffix(spec: string | undefined): string | undefined {
 
 export {
   openaiStream,
+  responsesStream,
   anthropicStream,
   geminiStream,
   createMockStream,
   openaiDefaultModel,
+  responsesDefaultModel,
   anthropicDefaultModel,
   geminiDefaultModel,
   mockDefaultModel,
   lookupContextWindow,
+  lookupKnownContextWindow,
   VENDOR_PRESETS,
   lookupVendor,
 };

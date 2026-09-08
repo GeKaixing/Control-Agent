@@ -125,7 +125,28 @@ function pruneOldTurns(
     }
 
     if (m.role === "toolResult") {
-      const text = m.content.map((c) => c.text).join("\n");
+      // 旧轮截图直接抹掉：图片 token 成本高，历史轮的图没有重看价值
+      // （需要时重新调用 screenshot 即可），只留一行线索。
+      const hasImage = m.content.some((c) => c.type === "image");
+      const text = m.content
+        .filter((c): c is Extract<(typeof m.content)[number], { type: "text" }> => c.type === "text")
+        .map((c) => c.text)
+        .join("\n");
+      if (hasImage) {
+        pruned += 1;
+        out.push({
+          ...m,
+          content: [
+            {
+              type: "text",
+              text:
+                `[${m.toolName} 返回的截图已省略；需要时重新调用 ${m.toolName}]` +
+                (text.length > 0 ? `\n${truncateText(text, options.maxToolResultChars)}` : ""),
+            },
+          ],
+        });
+        continue;
+      }
       if (text.length > options.maxToolResultChars) {
         pruned += 1;
         if (m.isError) {

@@ -4,6 +4,7 @@ import { useSessionStore } from "./store";
 import { Composer } from "./components/Composer";
 import { MessageList } from "./components/MessageList";
 import { StatusBar } from "./components/StatusBar";
+import { isMacPlatform, useWcoButtonWidth } from "./lib/wco";
 import type { Attachment } from "../../shared/api";
 
 /**
@@ -33,8 +34,13 @@ export function App({ showComposer = true }: { showComposer?: boolean }): React.
   }, [handleEvent, setInfo]);
 
   const handleSubmit = async (text: string, attachments: Attachment[]) => {
-    // 用户消息不在这里本地插入：host 在 submit 时广播 user_text 事件，
-    // 本地窗口与独立 UI 都靠事件流渲染（多端一致、不重复）
+    // 运行中提交 = 中途插话：走 steer 立即生效（Agent 当前轮结束后作为新输入消费）；
+    // 带附件时 steer 不支持，降级 submit 入 followUp 队列（当前任务结束后带上）。
+    // 用户消息都不在这里本地插入：host 广播 user_text 事件，多端统一靠事件流渲染。
+    if (status === "running" && attachments.length === 0) {
+      await window.api.steer(text);
+      return;
+    }
     const result = await window.api.submit(text, attachments);
     if (!result.ok && result.error !== undefined) {
       handleEvent({ t: "error", message: result.error });
@@ -54,6 +60,11 @@ export function App({ showComposer = true }: { showComposer?: boolean }): React.
   const handlePlanContinue = async () => {
     await window.api.planContinue();
   };
+
+  // 标题栏拖动条的平台留位：macOS 红绿灯 80px；Windows WCO 原生按钮区宽度避让
+  // （不留的话右上角的「复制回答」图标会被 最小化/最大化/关闭 盖住——真踩过的坑）
+  const isMac = isMacPlatform();
+  const wcoWidth = useWcoButtonWidth();
 
   // ── 标题栏复制按钮 ──
   // 优先复制 store 里最后一条 assistant turn 的完整回答正文（流式 delta 累积，
@@ -135,9 +146,16 @@ export function App({ showComposer = true }: { showComposer?: boolean }): React.
   if (showComposer) {
     return (
       <div ref={rootRef} className="flex flex-col bg-background text-foreground">
-        {/* 顶部拖动条：无原生标题栏（hiddenInset），兼任「会话标题 + 实时状态」栏——
-            pl-20 给 macOS 红绿灯留位，文字不可选中、不挡拖动。 */}
-        <div className="flex h-10 shrink-0 items-center gap-2 pr-4 pl-20 [-webkit-app-region:drag]">
+        {/* 顶部拖动条：无原生标题栏，兼任「会话标题 + 实时状态」栏——
+            macOS 左侧留红绿灯位；Windows（WCO）右侧留原生按钮区。
+            文字不可选中、不挡拖动。 */}
+        <div
+          className="flex h-10 shrink-0 items-center gap-2 [-webkit-app-region:drag]"
+          style={{
+            paddingLeft: isMac ? "5rem" : "0.75rem",
+            paddingRight: `calc(${wcoWidth}px + 1rem)`,
+          }}
+        >
           {info !== null && info.sessionTitle.length > 0 && (
             <span
               className="max-w-[16rem] truncate text-xs font-medium text-foreground select-none"

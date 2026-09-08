@@ -1,4 +1,4 @@
-# tools/ —— 7 个内置工具
+# tools/ —— 9 个内置工具
 
 **关注点**：把模型能调用的「动作」都收口在这里。模型看到的是 `LlmTool[]`（带 JSON Schema
 签名），执行时拿到的是 `Tool.execute(args, ctx)` 的统一签名。每个工具都标 `isMutating`
@@ -8,8 +8,8 @@
 
 | 文件 | 行数级 | 职责 |
 | --- | --- | --- |
-| `index.ts` | ~60 | `TOOL_REGISTRY`（单一真相源）；`ToolName` 联合派生；`allTools` / `describeToolsForModel()` |
-| `types.ts` | ~30 | `Tool` 接口、`ToolContext { cwd, signal }`、`ToolResult { content, isError }`、`ok()` / `fail()` 辅助 |
+| `index.ts` | ~65 | `TOOL_REGISTRY`（单一真相源）；`ToolName` 联合派生；`allTools` / `describeToolsForModel()` |
+| `types.ts` | ~40 | `Tool` 接口、`ToolContext { cwd, signal }`、`ToolResult { content, isError }`、`ok()` / `fail()` / `okImage()` 辅助 |
 | `validate.ts` | ~? | `validateParams(schema, args)`：用本目录精简版 `JsonSchema` 校验参数 |
 | `fs-utils.ts` | ~? | `resolvePath()`、`truncateText()`、walk 时跳过隐藏目录与 `IGNORED_DIRS` |
 | `glob-matcher.ts` | ~? | glob 模式 → 正则 |
@@ -20,6 +20,8 @@
 | `glob.ts` | ~? | 走 `fs-utils.walk` 的 glob 匹配 |
 | `grep.ts` | ~? | 走 `parseSse` 类似的字节流解析，最终落到 ripgrep 后端 |
 | `memory.ts` | ~? | 跨会话记忆：append（带时间戳追加到项目根 `MEMORY.md`）/ read（读回，保留尾部 8K）；注入端在 `session.ts` 的 `collectProjectMemory` |
+| `screenshot.ts` | ~110 | Computer Use 感知端：PowerShell + System.Drawing 截全虚拟屏 → JPEG dataUrl（Windows only，零 npm 依赖）；`isMutating: false` |
+| `computer.ts` | ~230 | Computer Use 执行端：鼠标点击/双击/右键、type（剪贴板粘贴）、hotkey（SendKeys 映射）、scroll；坐标取自 screenshot 图片，内部加虚拟屏偏移换算；Windows only；`isMutating: true` |
 
 ## `Tool` 接口
 
@@ -33,9 +35,10 @@ interface Tool {
 }
 
 interface ToolContext { cwd: string; signal: AbortSignal; }
-interface ToolResult   { content: TextContent[]; isError: boolean; }
+interface ToolResult   { content: (TextContent | ImageContent)[]; isError: boolean; }
 
 function ok(text:  string): ToolResult;
+function okImage(dataUrl: string, text: string): ToolResult;   // screenshot 用
 function fail(text: string): ToolResult;
 ```
 
@@ -43,7 +46,10 @@ function fail(text: string): ToolResult;
 
 - `execute()` 不抛异常——失败用 `fail(...)` 返回；异常由 `agent.ts:executeToolCalls` 兜底转 `fail`
 - `isMutating: true` ⇒ `agent.ts` 会串行 await；`false` ⇒ 只读，可并行
-- 返回 `content` 用 `TextContent[]`（统一多模态预留位），目前每个工具都只用 `[{ type: "text", text: "..." }]`
+- `content` 支持 `TextContent` 与 `ImageContent`（dataUrl）混排：screenshot 返回
+  `okImage(dataUrl, 说明文本)`，图片随 toolResult 一起进模型上下文（OpenAI 端转
+  `image_url` part，Anthropic 端转 base64 source）；transformContext 在压缩旧轮次时
+  把图片块替换成占位文本（省 token，需要时重新截图）
 
 ## 工具表与并行性
 
@@ -55,6 +61,21 @@ function fail(text: string): ToolResult;
 | `bash` | 跑 shell | true | `command`, `timeLimitMs?`（默认 120s，上限 600s，输出按 `MAX_OUTPUT_CHARS` 截断） |
 | `glob` | 路径匹配 | false | `pattern`（glob 模式） |
 | `grep` | 内容搜索 | false | `pattern`, `path?`, `include?`（ripgrep 后端） |
+| `memory` | 跨会话记忆 | true | `action`(append/read), `content?` |
+| `screenshot` | 截屏（Computer Use 感知） | false | 无参数；返回 JPEG + 尺寸 + 虚拟屏原点 |
+| `computer` | 鼠标键盘（Computer Use 执行） | true | `action`(click/doubleClick/rightClick/type/hotkey/scroll), `x?`, `y?`, `content?`, `keys?`, `direction?`, `amount?` |
+
+### Computer Use 坐标与安全约定
+
+- **坐标语义**：模型看到的截图左上角是 `(0,0)`；`computer` 执行时把该坐标加上
+  虚拟屏原点（`VirtualScreen.X/Y`）换成物理像素。两端都用 `SetProcessDPIAware`
+  保证 DPI 缩放下物理像素一致。
+- **安全边界**：`computer` 影响真实桌面且无 git 回滚——桌面端必须过 `approvalGate`；
+  CLI 无审批门，靠动作留痕（返回值记录每次操作）+ 屏幕变化可见兜底。
+  这是 Permission 支柱「不可逆操作过人」的直接案例。
+- **已知副作用**：`type` 走剪贴板粘贴（与 UI-TARS pyautogui `input_swap` 同策略），
+  会覆盖用户当前剪贴板；工具描述里已向模型明示。
+- **`type` 里的中文**：走 Unicode 剪贴板粘贴，比 SendKeys 逐字符可靠。
 
 ## `describeToolsForModel()` —— 给模型的工具清单
 
@@ -127,6 +148,11 @@ void _checkAll;   // 编译期失败时会把诊断推到这一行
 
 ## 已知坑
 
+- **`screenshot` / `computer` 尚未在真实桌面端到端验证**（2026-09-08）：脚本依赖
+  `Add-Type` 做 P/Invoke（SetProcessDPIAware / mouse_event），在受安全策略限制的
+  运行环境（如本仓库开发会话的钩子）里会被拒绝执行，`execute` 返回 `fail`。
+  首次真实使用前先手动验证：`screenshot` → 模型能否拿到图；`computer` click →
+  鼠标是否移动。类型链路（toolResult 图片 → openai/anthropic → 模型）已有单测覆盖。
 - **`bash` 里的 `grep` 在本环境不可靠**：实测 `grep -n "..." tests/run.ts` 假阴性。
   排查时改用本仓库自带的 `Grep` 工具（ripgrep 后端）。
 - **`edit` 不知道跨文件边界**：精确替换是基于文件内容的字符串匹配，不会自动选
@@ -134,3 +160,5 @@ void _checkAll;   // 编译期失败时会把诊断推到这一行
 - **`write` 写盘是覆盖式**：传 `content` 就是整文件覆盖；做局部修改应该用 `edit`。
 - **`read` 大文件截断是单向的**：从顶部 `limit` 行 / `fromLine` 起的内容，不保留两侧。
   超大文件先 `grep` 精准定位行号，再 `read` 拿对应区间。
+- **同一文件多次编辑必须串行**：并行 Edit 同一文件会互相覆盖（各自基于旧快照写盘），
+  报成功但改动丢失。2026-09-08 在 toolResult 图片通道改造中踩过。

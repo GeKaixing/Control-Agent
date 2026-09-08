@@ -47,13 +47,23 @@ export function convertToLlm(messages: AgentMessage[]): LlmMessage[] {
       continue;
     }
 
-    const blocks: LlmContent[] = m.content.map((c) => ({
-      type: "toolResult",
-      toolCallId: m.toolCallId,
-      toolName: m.toolName,
-      content: c.text.length > 0 ? [{ type: "text", text: c.text }] : [{ type: "text", text: "（无输出）" }],
-      isError: m.isError,
-    }));
+    const blocks: LlmContent[] = [
+      {
+        type: "toolResult",
+        toolCallId: m.toolCallId,
+        toolName: m.toolName,
+        // 图片块随 toolResult 一起带给模型（screenshot 的截图）
+        content: m.content.map((c) =>
+          c.type === "image"
+            ? { type: "image" as const, dataUrl: c.dataUrl }
+            : {
+                type: "text" as const,
+                text: c.text.length > 0 ? c.text : "（无输出）",
+              },
+        ),
+        isError: m.isError,
+      },
+    ];
 
     const prev = out[out.length - 1];
     if (prev !== undefined && prev.role === "toolResult") {

@@ -9,8 +9,8 @@
  */
 
 import assert from "node:assert/strict";
-import type { StreamOptions } from "../src/providers/types.js";
-import { decideForTest } from "../src/providers/mock.js";
+import type { StreamOptions, StreamEvent } from "../src/providers/types.js";
+import { decideForTest, mockStream } from "../src/providers/mock.js";
 import type { JsonSchema, LlmTool } from "../src/providers/types.js";
 import { test } from "./registry.js";
 
@@ -183,6 +183,18 @@ test("mock: probe 派发优先级高于通用 grep/read（不会被误派到 rea
   const plan = decideForTest(opts("看看 /tmp/clip.mp4 的元数据", tools));
   assert.equal(plan.calls.length, 1);
   assert.equal(plan.calls[0]?.name, "video.probe");
+});
+
+test("mock: 「模拟模型失败」触发流错误事件（错误输出链路测试钩子）", async () => {
+  const events: StreamEvent[] = [];
+  for await (const e of mockStream(opts("模拟模型失败", []))) events.push(e);
+
+  assert.equal(events.length, 1, "只 yield 一个 error 事件，无 start/text/done");
+  const errors = events.flatMap((e) => (e.type === "error" ? [e] : []));
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0]?.reason, "error");
+  assert.match(errors[0]?.error.errorMessage ?? "", /MOCK_ERROR/);
+  assert.equal(errors[0]?.error.stopReason, "error");
 });
 
 test("mock: 工具结果已在上下文时直接给总结，不再二次派发", () => {

@@ -25,7 +25,7 @@ case "turn_start":     // 打个空行
 case "steering":       // 灰字「↳ 收到中途指令：xxx」
 case "stream":         // 转发给 handleStream
 case "tool_end":       // ✓ bash 36ms + 前 12 行输出；失败时换成红色 ✗
-case "turn_end":       // 错误信息（红色）；最终回答时给 token 行
+case "turn_end":       // 错误信息（红色，与已打印的流错误同文时去重）；最终回答时给 token 行
 case "context_pruned": // 黄字「上下文已裁剪：丢弃 N 条消息，压缩 M 处工具结果」
 case "notice":         // 黄字
 case "agent_end":      // 闭合上一段
@@ -62,7 +62,7 @@ case "tool_start":     // （无输出）
 | --- | --- |
 | `answer: string` | 所有 `text_delta` 拼起来 |
 | `warnings: string[]` | `notice` + `context_pruned` |
-| `errors: string[]` | `stream.error` + `turn_end.message.errorMessage` |
+| `errors: string[]` | `stream.error` + `turn_end.message.errorMessage`（同文去重；turn_end 干净收尾 = 流错误已被重试恢复，清空不计失败） |
 | `exitCode: 0 \| 1` | `errors.length > 0 ? 1 : 0` |
 
 `index.ts` 在 print 模式下把 `answer` 写 stdout、`warnings` / `errors` 写 stderr，并按

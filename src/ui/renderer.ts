@@ -45,6 +45,8 @@ export class TerminalRenderer {
   private pendingNewline = false;
   /** 流式 Markdown 渲染：按行攒，避免跨 delta 的标记被切坏 */
   private md: MarkdownStream;
+  /** 最近一次流错误文本：turn_end 的 errorMessage 与之同文时不再重复打印 */
+  private lastStreamError: string | null = null;
 
   constructor(options: RendererOptions) {
     this.verbose = options.verbose;
@@ -81,7 +83,10 @@ export class TerminalRenderer {
         break;
 
       case "tool_end": {
-        const text = event.result.content.map((c) => c.text).join("\n");
+        const text = event.result.content
+          .filter((c) => c.type === "text")
+          .map((c) => c.text)
+          .join("\n");
         const lines = text.split("\n").slice(0, RESULT_LINES);
         const more = text.split("\n").length > RESULT_LINES ? "\n  …" : "";
         const body = lines
@@ -98,9 +103,15 @@ export class TerminalRenderer {
 
       case "turn_end": {
         const m = event.message;
-        if (m.errorMessage !== undefined && m.errorMessage.length > 0) {
+        if (
+          m.errorMessage !== undefined &&
+          m.errorMessage.length > 0 &&
+          m.errorMessage !== this.lastStreamError
+        ) {
           process.stdout.write(`${RED}模型出错：${m.errorMessage}${RESET}\n`);
         }
+        // 配对窗口关闭：下个 turn 的流错误要重新可见
+        this.lastStreamError = null;
         // 中间轮次（还会继续调工具）不打印用量，等最终回答时再给
         const hasToolCalls = m.content.some((c) => c.type === "toolCall");
         if (m.usage.total > 0 && !hasToolCalls) {
@@ -177,9 +188,11 @@ export class TerminalRenderer {
       }
 
       case "error":
-        process.stdout.write(
-          `${RED}流错误：${event.error.errorMessage ?? "未知错误"}${RESET}\n`,
-        );
+        {
+          const text = event.error.errorMessage ?? "未知错误";
+          process.stdout.write(`${RED}流错误：${text}${RESET}\n`);
+          this.lastStreamError = text;
+        }
         break;
 
       default:

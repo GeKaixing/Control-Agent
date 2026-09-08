@@ -135,7 +135,7 @@ export interface BaseUrlPresetInfo {
   label: string;
   baseURL: string;
   /** 请求协议；缺省 "openai"（OpenAI 兼容） */
-  protocol?: "openai" | "anthropic" | "gemini";
+  protocol?: "openai" | "responses" | "anthropic" | "gemini";
   /** 选中后预填的默认模型名（仅当模型名输入框为空时填入） */
   defaultModel?: string;
   /** 模型名输入框的 placeholder 提示 */
@@ -145,6 +145,7 @@ export interface BaseUrlPresetInfo {
 /**
  * 「自定义模型」弹窗参数：三要素 + 协议。
  * protocol="openai"（缺省）：baseURL 填到版本目录（…/v1），/chat/completions 由内核拼；
+ * protocol="responses"：OpenAI 新一代 Responses API，/responses 由内核拼（baseURL 填法同 openai）；
  * protocol="anthropic"：baseURL 填根路径（不带 /v1），/v1/messages 由内核拼；
  * protocol="gemini"：baseURL 填到 /v1beta，streamGenerateContent 由内核拼。
  */
@@ -153,7 +154,7 @@ export interface CustomModelParams {
   apiKey: string;
   /** 模型 id（如 deepseek-chat） */
   model: string;
-  protocol?: "openai" | "anthropic" | "gemini";
+  protocol?: "openai" | "responses" | "anthropic" | "gemini";
   /**
    * 上下文窗口手动覆写（用户原文）：纯数字（1000000）或 k/m 后缀（256k、1m）。
    * 空 / 缺省 = 自动识别（/models 元数据 → 内核粗表）。端点不给元数据时
@@ -173,7 +174,8 @@ export interface InfoPayload {
   /**
    * 当前模型的上下文窗口上限（token 数）。优先取提供商 /models 元数据给的
    * 值（context_window / context_length / inputTokenLimit）；端点没给或元数据
-   * 未拉到时回退内置粗表（model id 前缀匹配，兜底 128000）。
+   * 未拉到时回退内置粗表（model id 正则匹配），表也没命中时兜底 1M——
+   * 误判大只浪费安全余量，误判小会白白丢历史。
    */
   contextWindow: number;
   /** 当前 provider 的 base URL（来自 env 或默认值）。UI 只读展示。 */
@@ -309,6 +311,12 @@ export interface DesktopApi {
   setModel(spec: string): Promise<SetModelResult>;
   /** 自定义模型：接口地址 + API KEY + 模型名称（OpenAI 兼容协议）。下一次新建的 Agent 生效。 */
   setCustomModel(params: CustomModelParams): Promise<SetModelResult>;
+  /**
+   * 「自定义模型」弹层：按用户当场填的 baseURL + apiKey + protocol 直连
+   * 端点 /models 拉可用模型列表（不读 env、不落缓存）。失败时 result.error
+   * 有值且 models 为空——前端回退手动填写。
+   */
+  listCustomModels(params: Pick<CustomModelParams, "baseURL" | "apiKey" | "protocol">): Promise<ListModelsResult>;
   setMode(mode: RunMode): Promise<void>;
   setReasoning(level: ReasoningLevel): Promise<void>;
   /** 切换端点（rebuild provider）。mock ↔ openai ↔ anthropic。 */
@@ -332,6 +340,8 @@ export interface DesktopApi {
   switchTo(index: number): Promise<SwitchSessionResult>;
   /** 会话清单：当前位置 + 总数 + 各会话标题（「选择会话」popover 用）。 */
   listSessions(): Promise<ListSessionsResult>;
+  /** 当前平台（darwin / win32 / linux）：StatusBar 按平台适配标题栏留位。 */
+  readonly platform: "darwin" | "win32" | "linux";
   info(): Promise<InfoPayload>;
   /**
    * 列 cwd 下文件，给 @ 引用 popover 用。
@@ -367,6 +377,11 @@ export interface DesktopApi {
   popoverSetHeight(h: number): Promise<void>;
   /** 弹层子窗口 → 主进程 → 主窗口渲染层的 UI 动作（如 refresh-info 刷新头部信息）。 */
   uiAction(action: string): Promise<void>;
+  /**
+   * 独立消息弹窗开关：true 时主进程创建 ?msg-window=1 小窗，false 销毁（幂等）。
+   * 偏好由主进程回写，经 info 回显到设置弹层。
+   */
+  setMsgWindow(on: boolean): Promise<void>;
   onEvent(cb: (e: WireEvent) => void): () => void;
 }
 

@@ -2,11 +2,13 @@
 
 import type { LlmTool } from "../providers/types.js";
 import { bashTool, resolveShell, type ShellSpec } from "./bash.js";
+import { computerTool } from "./computer.js";
 import { editTool } from "./edit.js";
 import { globTool } from "./glob.js";
 import { grepTool } from "./grep.js";
 import { memoryTool } from "./memory.js";
 import { readTool } from "./read.js";
+import { screenshotTool } from "./screenshot.js";
 import type { Tool } from "./types.js";
 import { describeSchema } from "./validate.js";
 import { writeTool } from "./write.js";
@@ -28,6 +30,8 @@ const _registry = {
   glob: globTool,
   grep: grepTool,
   memory: memoryTool,
+  screenshot: screenshotTool,
+  computer: computerTool,
 } as const;
 
 export const TOOL_REGISTRY = _registry;
@@ -60,6 +64,6 @@ export function describeToolsForModel(tools: Tool[] = allTools): LlmTool[] {
 }
 
 export type { Tool, ToolContext, ToolResult } from "./types.js";
-export { bashTool, editTool, globTool, grepTool, memoryTool, readTool, writeTool, resolveShell };
+export { bashTool, computerTool, editTool, globTool, grepTool, memoryTool, readTool, screenshotTool, writeTool, resolveShell };
 export { memoryPath, MEMORY_FILE } from "./memory.js";
 export type { ShellSpec };

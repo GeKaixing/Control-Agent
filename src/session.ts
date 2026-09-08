@@ -63,6 +63,11 @@ export interface AssembleOptions {
   cwd: string;
   /** "openai:gpt-4o-mini" 这类写法；省略走环境变量 → 降级 mock */
   modelSpec?: string;
+  /**
+   * 完整 ModelRef 直接注入（优先于 modelSpec）——自定义模型恢复用：
+   * baseUrl/apiKey 无法编码进 spec 字符串，持久化层存的是完整参数对象。
+   */
+  modelRef?: ModelRef;
   /** 完全替换默认系统提示词 */
   systemPrompt?: string;
   /** 追加到默认系统提示词末尾 */
@@ -263,7 +268,11 @@ export async function readGitSnapshot(
  */
 export async function assembleSession(opts: AssembleOptions): Promise<AssembledSession> {
   await loadDotEnv(opts.cwd);
-  const { resolved } = resolveModelSpec(opts.modelSpec);
+  // modelRef（自定义模型恢复）优先于 modelSpec——spec 编码不了 baseUrl/apiKey
+  const { resolved } =
+    opts.modelRef !== undefined
+      ? { resolved: resolveModel(opts.modelRef) }
+      : resolveModelSpec(opts.modelSpec);
 
   // mode 决定 tool 列表：answer_only 强制空，其它保留全部
   const baseTools: Tool[] = opts.mode === "answer_only" ? [] : mergeTools(opts.extraTools);

@@ -44,12 +44,15 @@ export function PopoverHost({ id }: { id: string }): React.ReactElement {
     });
   }, []);
 
-  // 内容高度上报（info 到位后内容才真正成型，依赖里带上）
+  // 内容高度上报（info 到位后内容才真正成型，依赖里带上）。
+  // 量 scrollHeight（内容自然高度）而不是容器实际高度：窗口被屏幕边界夹矮时，
+  // 根容器会被 max-h-screen 压扁，报压扁值会和窗口高度互锁（初始 stub 40px
+  // 永远长不大）；报自然高度则夹紧后数值稳定，超出窗口的部分内部滚动。
   useEffect(() => {
     const el = rootRef.current;
     if (el === null) return;
     const report = (): void => {
-      void window.api.popoverSetHeight(Math.ceil(el.getBoundingClientRect().height));
+      void window.api.popoverSetHeight(Math.ceil(el.scrollHeight));
     };
     report();
     const ro = new ResizeObserver(report);
@@ -144,7 +147,9 @@ export function PopoverHost({ id }: { id: string }): React.ReactElement {
   }
 
   return (
-    <div ref={rootRef} className="bg-background text-foreground">
+    // max-h-screen + 内部滚动：窗口高度被主进程夹到屏幕边界时（如主窗口贴屏幕底），
+    // 弹层不再整体跳位，超出部分在这里滚——底部按钮始终可达
+    <div ref={rootRef} className="max-h-screen overflow-y-auto bg-background text-foreground">
       {content}
     </div>
   );

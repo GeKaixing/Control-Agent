@@ -1,6 +1,6 @@
 # providers/ —— 模型适配器
 
-**关注点**：屏蔽 OpenAI / Anthropic / mock 三家厂商的协议差异，把它们都收敛成同一个
+**关注点**：屏蔽 OpenAI（chat/responses）/ Anthropic / Gemini / mock 的协议差异，把它们都收敛成同一个
 `StreamFn`，让 `agent.ts` 完全不关心「我现在连的是哪家模型」。
 
 ## 文件清单
@@ -10,8 +10,10 @@
 | `types.ts` | ~120 | `StreamEvent` 联合、`StreamFn` 类型、`LlmMessage` / `LlmContent` / `LlmTool` 数据形态，精简 `JsonSchema`（用于工具参数声明与校验） |
 | `stream.ts` | ~190 | `StreamAccumulator`：把各家增量事件统一累积成 `AssistantMessage`；`parseSse` 把 `ReadableStream` 切成完整 `data:` 行；`StreamError` 抛带 status 的错误 |
 | `openai.ts` | ~230 | OpenAI Chat Completions 适配器：`/v1/chat/completions`、流式 SSE、tool_call 增量累积；`openaiDefaultModel()` 默认从环境变量读 |
+| `responses.ts` | ~280 | OpenAI Responses API 适配器（新一代 `/v1/responses`）：instructions+input 消息形状、扁平 tools、function_call(_output) item 回放、reasoning 增量（历史 thinking 不回放）、`response.completed` usage；`responsesDefaultModel()` 与 openai 同 key/baseUrl 源 |
 | `anthropic.ts` | ~? | Anthropic API 适配器（同形态） |
-| `mock.ts` | ~? | `createMockStream()`：离线测试 / 缺 key 时降级使用；脚本式应答 |
+| `gemini.ts` | ~? | Gemini 原生 REST 适配器（`streamGenerateContent?alt=sse`） |
+| `mock.ts` | ~? | `createMockStream()`：离线测试 / 缺 key 时降级使用；脚本式应答；「模拟模型失败」关键字触发流错误事件（错误输出链路的测试钩子） |
 | `index.ts` | ~75 | `resolveModel()` / `parseModelSpec()` / `defaultModel()`；按 `ModelRef.provider` 把请求分给具体适配器；`mock` 在缺 key 时自动降级 |
 
 ## 收敛后的统一接口
@@ -99,6 +101,13 @@ function resolveModel(model: ModelRef): ResolvedModel {
    ```
 3. 在 `types.ts` 加 `ProviderId` 联合的一个分支，并实现 `defaultModel()`。
 4. 把新环境变量名（如 `<YOUR>_API_KEY`）加进 `resolveModel()` 的「缺 key 降级 mock」判断。
+
+### OpenAI 兼容厂商的捷径
+
+多数厂商只是「OpenAI 协议 + 不同 baseUrl / key」，不必新建适配器：在 `vendors.ts`
+的 `VENDOR_PRESETS` 加一条预设，即可自动获得 spec 前缀（含别名）、`<VENDOR>_BASE_URL`
+覆盖、缺 key 降级提示。桌面端「自定义模型」弹层的接口地址预设来自同文件的
+`BASE_URL_PRESETS`（经 InfoPayload 下发，渲染层不抄一份）。
 
 ## 已知坑
 

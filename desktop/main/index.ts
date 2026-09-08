@@ -2,7 +2,8 @@
  * Electron 主进程入口（CJS emit，tsc -p desktop/tsconfig.main.json 编译）。
  *
  * 职责：
- * 1. 创建 BrowserWindow（dev 时连 vite dev server；build 时 loadFile）
+ * 1. 创建 BrowserWindow（dev 时连 vite dev server；build 时 loadFile；
+ *    dev 下 vite 没起自动落回 renderer-dist，见 loadRenderer）
  * 2. 装配 SessionManager + 注册 IPC handler
  * 3. 把 SessionManager 发出的 WireEvent 透给渲染进程
  *
@@ -18,7 +19,7 @@
  * 直接炸 `Cannot read properties of undefined (reading 'exports')`。
  */
 
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, screen, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, screen, shell, type IpcMainInvokeEvent } from "electron";
 import path from "node:path";
 
 import { ConnectorRuntime } from "../../src/connector/runtime/connector-runtime.js";
@@ -31,6 +32,13 @@ import { IPC } from "./ipc.js";
 import { SessionManager, type SessionDeps } from "./session.js";
 import { DictationController } from "./dictation.js";
 import { assembleSession } from "../../src/session.js";
+import {
+  readSavedCustomModel,
+  readSavedModelSpec,
+  saveCustomModel,
+  saveModelSpec,
+  type StoredCustomModel,
+} from "../../src/context/index.js";
 import type { WireEvent } from "../shared/api.js";
 
 interface StartDeps {
@@ -64,6 +72,44 @@ let popoverLastId: string | null = null;
 
 const RENDERER_DEV_URL = process.env["VITE_DEV_SERVER_URL"] ?? "http://127.0.0.1:5173";
 const IS_DEV = !app.isPackaged;
+
+/** 渲染层 vite build 产物入口（相对 desktop/main 上一层） */
+function indexHtmlPath(deps: StartDeps): string {
+  return path.join(deps.__dirname, "..", "renderer-dist", "index.html");
+}
+
+/** vite dev server 探活：主进程 Node fetch 不走系统代理，直连语义准确 */
+async function devServerAlive(): Promise<boolean> {
+  try {
+    const resp = await fetch(RENDERER_DEV_URL, { signal: AbortSignal.timeout(1_500) });
+    return resp.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 统一的渲染层加载入口。dev 分支不再盲连 dev server：**先探活**，活着走
+ * loadURL（热更新），没起就落回 loadFile(renderer-dist) 并打日志。
+ *
+ * 为什么必须有这层：主窗口是 vite 活着时加载的活页面，vite 死了它还能撑着
+ * （HMR 断连只影响热更新）；但弹层 / 消息窗每次都是**新建** BrowserWindow
+ * 即时 loadURL——vite 一死就 `ERR_FAILED (-2) loading 'http://127.0.0.1:5173…'`
+ * （真实案例：弹「自定义模型」报错，主窗口却一切正常）。落回旧构建最多
+ * 是界面落后一版，好过白屏 / 弹层打不开；日志注明原因，不静默装没事。
+ */
+async function loadRenderer(win: BrowserWindow, deps: StartDeps, opts: { search?: string } = {}): Promise<void> {
+  if (IS_DEV) {
+    if (await devServerAlive()) {
+      await win.loadURL(opts.search !== undefined ? `${RENDERER_DEV_URL}?${opts.search}` : RENDERER_DEV_URL);
+      return;
+    }
+    console.log(
+      `[desktop] vite dev server（${RENDERER_DEV_URL}）未响应，本次加载落回 renderer-dist 构建产物（界面可能是旧构建）；要热更新请先启动 vite`,
+    );
+  }
+  await win.loadFile(indexHtmlPath(deps), opts.search !== undefined ? { search: opts.search } : undefined);
+}
 
 /** 主进程 → 渲染进程：推 WireEvent 给 BrowserWindow（显示 connector 的默认 transport） */
 function pushEvent(e: WireEvent): void {
@@ -114,10 +160,13 @@ function createMsgWindow(deps: StartDeps): void {
     minHeight: 200,
     frame: false,
     backgroundColor: "#ffffff",
-    // 用户可拖到任意角落、可拖大小；不进任务栏（浮窗形态），不随 app 隐藏
+    // 用户可拖到任意角落、可拖大小。
+    // **必须进任务栏**：Windows 上 skipTaskbar 会同时把窗口从任务栏和 Alt+Tab
+    // 列表里摘掉——切走之后既没有图标也没有切换入口，用户就找不回这个窗了。
+    // 「独立消息窗」的定位是可 Alt+Tab 回来，所以要留任务栏条目。
     resizable: true,
     movable: true,
-    skipTaskbar: true,
+    skipTaskbar: false,
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
@@ -135,12 +184,7 @@ function createMsgWindow(deps: StartDeps): void {
     if (msgWin === win) msgWin = null;
   });
   const query = "msg-window=1";
-  if (IS_DEV) {
-    void msgWin.loadURL(`${RENDERER_DEV_URL}?${query}`);
-  } else {
-    const indexHtml = path.join(deps.__dirname, "..", "renderer-dist", "index.html");
-    void msgWin.loadFile(indexHtml, { search: query });
-  }
+  void loadRenderer(msgWin, deps, { search: query });
 }
 
 /** 销毁独立消息弹窗（幂等）。setImmediate 延迟：从渲染层 setMsgWindow(false) 的
@@ -326,6 +370,7 @@ function registerIpcHandlers(deps: StartDeps): void {
   handle(IPC.LIST_SESSIONS, "listSessions");
   handle(IPC.LIST_FILES, "listFiles");
   handle(IPC.LIST_MODELS, "listModels");
+  handle(IPC.LIST_CUSTOM_MODELS, "listCustomModels");
 
   // 听写不属于 SessionManager（独立 helper 进程），不走 dispatchApi：
   ipcMain.handle(IPC.DICTATE_START, async () => {
@@ -428,12 +473,7 @@ function registerIpcHandlers(deps: StartDeps): void {
       if (popoverWin === win) closePopoverWin();
     });
     const query = `popover=${id}`;
-    if (IS_DEV) {
-      await popoverWin.loadURL(`${RENDERER_DEV_URL}?${query}`);
-    } else {
-      const indexHtml = path.join(deps.__dirname, "..", "renderer-dist", "index.html");
-      await popoverWin.loadFile(indexHtml, { search: query });
-    }
+    await loadRenderer(popoverWin, deps, { search: query });
   });
 
   ipcMain.handle(IPC.CLOSE_POPOVER, async () => {
@@ -453,8 +493,16 @@ function registerIpcHandlers(deps: StartDeps): void {
     // 上方空间：按钮顶边上方到工作区顶
     const spaceAbove =
       popoverPos.triggerTop !== null ? Math.max(0, popoverPos.triggerTop - GAP - work.y) : 0;
-    // 首次排布：下方放不下、且上方更宽裕 → 整体翻到按钮上方
-    if (!popoverPos.flipped && height > spaceBelow && spaceAbove > spaceBelow) {
+    // 首次排布：下方放不下、且上方更宽裕 → 整体翻到按钮上方。
+    // 只在窗口显示前决策一次：显示后再改方向 = 整个弹层从按钮下方跳到上方。
+    // 表单类弹层内容高度会动态变化（如自定义模型拉到模型列表后变高），
+    // 后续高度增长一律沿当前方向伸缩 + 夹屏幕边界，超出部分由渲染层内部滚动。
+    if (
+      !popoverPos.flipped &&
+      !popoverWin.isVisible() &&
+      height > spaceBelow &&
+      spaceAbove > spaceBelow
+    ) {
       popoverPos.flipped = true;
     }
     if (popoverPos.flipped && popoverPos.triggerTop !== null) {
@@ -532,10 +580,18 @@ async function createWindow(deps: StartDeps): Promise<void> {
     // 标题栏底色跟渲染层浅色主题保持一致（白）。试过 transparent: true 让弹层区域
     // 透出桌面，用户实测后不要——保持白底；弹层空间由渲染层 spacer 撑高窗口解决。
     backgroundColor: "#ffffff",
-    // macOS：隐藏原生标题栏（保留左上角红绿灯浮在页面上），让渲染层的
-    // StatusBar 直接充当标题栏 —— 颜色 / 内容完全由 renderer 自定义。
-    // 前提：StatusBar 需留出左侧 pl-20 给红绿灯，并标 drag 区域可拖窗口。
-    titleBarStyle: "hiddenInset",
+    // 标题栏：两侧平台各走各的方案，渲染层 StatusBar 统一兼任标题栏内容——
+    // - macOS：hiddenInset 隐藏原生标题栏，红绿灯浮在 StatusBar 左侧（pl-20 留位）。
+    // - Windows：hidden + titleBarOverlay（WCO，Window Controls Overlay）——左侧整块
+    //   交给渲染层自定义（logo / 文字 / 底色随便改），右侧保留原生 最小化/最大化/关闭。
+    //   注意 hiddenInset 在 Windows 上不生效（会回退成原生标题栏），必须用这组。
+    //   height 需跟 StatusBar 实际高度对齐（py-2 + text-xs ≈ 33px），按钮才垂直居中。
+    ...(process.platform === "darwin"
+      ? { titleBarStyle: "hiddenInset" as const }
+      : {
+          titleBarStyle: "hidden" as const,
+          titleBarOverlay: { color: "#ffffff", symbolColor: "#000000", height: 33 },
+        }),
     webPreferences: {
       // deps.__dirname = desktop/main（entry.mjs 所在目录）；preload 源在 desktop/preload，
       // 只上一层 .. 即 desktop/，再进 preload/。之前误用两层 .. 会退到仓库根 g/，加载失败。
@@ -554,13 +610,7 @@ async function createWindow(deps: StartDeps): Promise<void> {
     closePopoverWin();
   });
 
-  if (IS_DEV) {
-    await mainWindow.loadURL(RENDERER_DEV_URL);
-  } else {
-    // 渲染层 vite build 产物在 desktop/renderer-dist/index.html（相对 desktop/main 上一层）
-    const indexHtml = path.join(deps.__dirname, "..", "renderer-dist", "index.html");
-    await mainWindow.loadFile(indexHtml);
-  }
+  await loadRenderer(mainWindow, deps);
 }
 
 async function bootstrap(deps: StartDeps): Promise<void> {
@@ -576,11 +626,85 @@ async function bootstrap(deps: StartDeps): Promise<void> {
   }
   await app.whenReady();
 
-  const assembled = await assembleSession({ cwd: process.cwd() });
+  // 移除默认 ApplicationMenu。Electron 在没显式设置菜单时，会给无菜单应用注入一个
+  // 只含 placeholder 的菜单栏（File/Edit/View/Window/Help）——在 macOS 上是顶部全局
+  // 菜单，在 Windows 上会嵌进 frameless 窗口的拖动条旁边。c-agent 的 Composer 是
+  // 720 宽无边框小窗，不需要这条占位栏；tray 状态菜单（tray-status.ts）走的是
+  // Tray.setContextMenu，不受这条影响。
+  Menu.setApplicationMenu(null);
+
+  // 全窗口的外链与导航护栏（markdown 渲染后 <a> 可点，必须有这一层）：
+  // - window.open / target=_blank 一律拒绝建新 Electron 窗，http(s) 转系统默认浏览器；
+  // - 页内导航（will-navigate）一律拦掉——三个窗口都是单页应用，任何导航企图都是异常。
+  // 挂在 web-contents-created 上：主窗口、弹层、消息弹窗（及未来新窗）全覆盖。
+  app.on("web-contents-created", (_event, contents) => {
+    contents.setWindowOpenHandler(({ url }) => {
+      if (/^https?:/i.test(url)) void shell.openExternal(url);
+      return { action: "deny" };
+    });
+    contents.on("will-navigate", (e) => e.preventDefault());
+  });
+
+  // 模型持久化（与 CLI 共用 .c-agent/config.json，单一持久化出口）：
+  // MODEL env 显式设置时不读持久值（优先级与 CLI 一致）；spec 与自定义模型
+  // 完整参数互斥存同一文件（最后一次的选择是唯一真相），读到的交给
+  // SessionManager 恢复，缺 key 会降级 mock，UI 的模型标签如实显示。
+  const desktopCwd = process.cwd();
+  const modelEnvSet = process.env.MODEL !== undefined;
+  const savedModelSpec = modelEnvSet ? null : await readSavedModelSpec(desktopCwd);
+  const savedCustomModel =
+    modelEnvSet || savedModelSpec !== null ? null : await readSavedCustomModel(desktopCwd);
+  const assembled = await assembleSession({
+    cwd: desktopCwd,
+    ...(savedModelSpec !== null ? { modelSpec: savedModelSpec } : {}),
+  });
   // 消息显示通路：SessionManager emit → connector 路由 → desktop-display（默认连接）
   // → Electron IPC → 渲染层。Composer 的提交类 IPC（SUBMIT/STEER/…）不经过 connector。
   const emit = await bootstrapDisplayRoute(deps);
-  session = new SessionManager(assembled, { emit, approvalPrompt });
+  session = new SessionManager(assembled, {
+    emit,
+    approvalPrompt,
+    // 模型选择落盘（setModel / setEndpoint 触发 spec 版；setCustomModel 触发
+    // customModel 版，两者互斥）。写失败只留痕不阻断——与 CLI 同一策略。
+    persistModel: (spec) => {
+      void saveModelSpec(desktopCwd, spec).catch((err: unknown) => {
+        console.error(
+          `[session] 模型配置保存失败（${spec}）：${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    },
+    persistCustomModel: (custom: StoredCustomModel) => {
+      void saveCustomModel(desktopCwd, custom).catch((err: unknown) => {
+        console.error(
+          `[session] 自定义模型保存失败（${custom.id}）：${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    },
+  });
+  // 恢复上次的自定义模型（完整参数重建 ModelRef）。走 setCustomModel 复用
+  // 同一条校验/构造/state 同步链路；回写同值幂等，无害。
+  if (savedCustomModel !== null) {
+    const protocol =
+      savedCustomModel.provider === "openai-responses"
+        ? ("responses" as const)
+        : (savedCustomModel.provider as "openai" | "anthropic" | "gemini");
+    try {
+      session.setCustomModel({
+        baseURL: savedCustomModel.baseUrl,
+        apiKey: savedCustomModel.apiKey,
+        model: savedCustomModel.id,
+        protocol,
+        ...(savedCustomModel.contextWindow !== undefined
+          ? { contextWindow: String(savedCustomModel.contextWindow) }
+          : {}),
+      });
+      console.error(`提示：模型沿用持久配置（自定义模型 ${savedCustomModel.id}，.c-agent/config.json）`);
+    } catch (err: unknown) {
+      console.error(
+        `[session] 恢复自定义模型失败，回退默认：${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
   // 预热 /models 元数据：info() 的 contextWindow 优先取提供商给的值，
   // 但 info() 是同步的——不预热的话上下文使用量分母一直停在内置粗表。
   // 拉到新值后广播 refresh-info，UI 重拉 info 刷新进度条分母。

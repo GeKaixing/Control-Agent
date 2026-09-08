@@ -1,6 +1,7 @@
 import React from "react";
 import { Separator } from "./ui/separator";
 import type { InfoPayload, UsagePayload } from "../../../shared/api";
+import { isMacPlatform, useWcoButtonWidth } from "../lib/wco";
 import { Cpu, FolderTree, AlertTriangle } from "lucide-react";
 
 interface Props {
@@ -12,20 +13,53 @@ interface Props {
 }
 
 /**
- * 顶部状态条：会话标题 / cwd / 模型 / token 用量 / 通知。
+ * 顶部状态条：应用标识 / 会话标题 / cwd / 模型 / token 用量 / 通知。
  *
- * 兼任窗口标题栏（main 里 titleBarStyle: "hiddenInset"）：
- * - `pl-20` 给 macOS 红绿灯留位；
- * - `[-webkit-app-region:drag]` 让整条可拖动窗口；本条内没有可点元素，
- *   无须给子元素标 no-drag（切模型/新会话按钮都在 Composer，不在这条上）。
+ * 兼任窗口标题栏（main 里按平台配的 titleBarStyle）：
+ * - macOS（hiddenInset）：`pl-20` 给红绿灯留位；
+ * - Windows（hidden + titleBarOverlay / WCO）：左侧整块由本组件自定义，
+ *   右侧原生 最小化/最大化/关闭按钮区 用 `windowControlsOverlay` 动态量宽避让；
+ * - Linux（hidden，无 overlay）：无原生控件，两侧只留常规 padding。
+ * 整条 `[-webkit-app-region:drag]` 可拖动窗口；本条内没有可点元素。
  * 想换标题栏颜色：改这里的 bg-* 即可，原生标题栏已经不存在了。
+ *
+ * **左侧自定义入口**：见下方 <Brand /> —— logo / 名字 / 徽标想怎么换都行。
  *
  * 「切模型」已迁到 Composer 的 EndpointModelMenu + 自定义 modal；
  * 「新会话」已迁到 Composer 的 FilePlus 按钮（发送键左边）。本条只负责状态回显。
  */
-export function StatusBar({ info, usage, notice, title }: Props): React.ReactElement {
+
+/**
+ * Windows WCO 右侧按钮区宽度与平台判断的实现已抽到 lib/wco.ts
+ * （Composer 模式的顶部拖动条同样要避让），这里只消费。
+ */
+
+/** 左侧品牌位：标题栏自定义的最左元素。换 logo / 改名字只动这里。 */
+function Brand(): React.ReactElement {
   return (
-    <header className="flex flex-nowrap items-center gap-3 overflow-hidden border-b border-border bg-card/50 pr-4 pl-20 py-2 text-xs text-muted-foreground select-none [-webkit-app-region:drag]">
+    <span className="flex shrink-0 select-none items-center gap-1.5">
+      {/* 想换成图片 logo：把下面这个圆点换成 <img src=... className="h-4 w-4" /> */}
+      <span className="h-3.5 w-3.5 rounded-full bg-foreground" />
+      <span className="font-semibold tracking-wide text-foreground">c-agent</span>
+    </span>
+  );
+}
+
+export function StatusBar({ info, usage, notice, title }: Props): React.ReactElement {
+  // pl：darwin 红绿灯占位 80px；win32/linux 从左边缘开始，常规 padding 即可
+  const isMac = isMacPlatform();
+  const wcoWidth = useWcoButtonWidth();
+  return (
+    <header
+      className="flex flex-nowrap items-center gap-3 overflow-hidden border-b border-border bg-card/50 py-2 text-xs text-muted-foreground select-none [-webkit-app-region:drag]"
+      style={{
+        paddingLeft: isMac ? "5rem" : "0.75rem",
+        // 右侧给 WCO 原生按钮区让位（无 WCO 时 0 → 常规留白）
+        paddingRight: `calc(${wcoWidth}px + 1rem)`,
+      }}
+    >
+      <Brand />
+      <Separator orientation="vertical" className="h-3 shrink-0" />
       {info !== null && info.sessionTitle.length > 0 && (
         <span className="max-w-[16rem] shrink-0 truncate font-medium text-foreground" title={info.sessionTitle}>
           {info.sessionTitle}

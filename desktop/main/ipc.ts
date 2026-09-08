@@ -32,6 +32,8 @@ export const IPC = {
   LIST_FILES: "desktop:listFiles",
   /** 拉取端点可用模型列表（OpenAI 兼容 /models；URL 可由 env 配置覆盖） */
   LIST_MODELS: "desktop:listModels",
+  /** 「自定义模型」弹层：按用户填的 baseURL+key 直连拉取可用模型列表（不落缓存） */
+  LIST_CUSTOM_MODELS: "desktop:listCustomModels",
   /** macOS 听写：开始 / 停止（结果经 PUSH 通道的 dictation 事件流回） */
   DICTATE_START: "desktop:dictateStart",
   DICTATE_STOP: "desktop:dictateStop",

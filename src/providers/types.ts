@@ -41,7 +41,8 @@ export interface ToolResultContent {
   type: "toolResult";
   toolCallId: string;
   toolName: string;
-  content: TextContent[];
+  /** 文本块与图片块混排（各适配器转成厂商格式） */
+  content: (TextContent | ImageBlock)[];
   isError: boolean;
 }
 

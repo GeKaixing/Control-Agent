@@ -236,7 +236,7 @@ export function messageChars(m: AgentMessage): number {
     }
   } else {
     chars = 0;
-    for (const c of m.content) chars += c.text.length;
+    for (const c of m.content) chars += c.type === "image" ? 6000 : c.text.length;
   }
 
   messageCharsCache.set(m, chars);

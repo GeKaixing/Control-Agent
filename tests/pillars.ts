@@ -11,6 +11,11 @@ import os from "node:os";
 import path from "node:path";
 
 import { test, assert } from "./registry.js";
+
+/** 取工具结果内容里的全部文本（content 现在可能含 screenshot 返回的图片块） */
+function resultTextOf(content: { type: string; text?: string }[]): string {
+  return content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("");
+}
 import { Agent, type AgentEvent } from "../src/agent/agent.js";
 import { createInitialState, MessageQueue } from "../src/context/index.js";
 import { SessionManager } from "../desktop/main/session.js";
@@ -318,7 +323,7 @@ test("Permission：审批门拒绝 mutating 工具，文件不被写", async () 
     (m): m is Extract<typeof m, { role: "toolResult" }> => m.role === "toolResult",
   );
   assert.ok(result !== undefined && result.isError);
-  assert.ok(result.content[0]?.text.includes("审批门"));
+  assert.ok(resultTextOf(result.content).includes("审批门"));
 });
 
 test("Permission：只读工具不经过审批门", async () => {
@@ -397,7 +402,7 @@ test("Permission：bash 工具拦截灾难命令，不真正执行", async () =>
     { cwd: os.tmpdir(), signal: new AbortController().signal },
   );
   assert.ok(result.isError);
-  assert.ok(result.content[0]?.text.includes("已拦截灾难性命令"));
+  assert.ok(resultTextOf(result.content).includes("已拦截灾难性命令"));
 });
 
 // ------------------------------------------------------------ Context：项目记忆注入
@@ -425,7 +430,7 @@ test("Tool：memory append 写入带时间戳条目，read 读回", async () => 
   // 空记忆：read 提示不存在
   const empty = await memoryTool.execute({ action: "read" }, ctx);
   assert.equal(empty.isError, false);
-  assert.ok(empty.content[0]?.text.includes("还没有任何跨会话记忆"));
+  assert.ok(resultTextOf(empty.content).includes("还没有任何跨会话记忆"));
 
   // append → 写入 .c-agent/memory.md，带时间戳
   const appended = await memoryTool.execute(
@@ -444,8 +449,8 @@ test("Tool：memory append 写入带时间戳条目，read 读回", async () => 
 
   // read → 两条都在
   const readBack = await memoryTool.execute({ action: "read" }, ctx);
-  assert.ok(readBack.content[0]?.text.includes("用户偏好 TypeScript 严格模式"));
-  assert.ok(readBack.content[0]?.text.includes("项目用 npm test 跑测试"));
+  assert.ok(resultTextOf(readBack.content).includes("用户偏好 TypeScript 严格模式"));
+  assert.ok(resultTextOf(readBack.content).includes("项目用 npm test 跑测试"));
 });
 
 test("Tool：memory append 空 content 报错；未知 action 报错", async () => {
@@ -457,7 +462,7 @@ test("Tool：memory append 空 content 报错；未知 action 报错", async () 
 
   const badAction = await memoryTool.execute({ action: "delete" }, ctx);
   assert.ok(badAction.isError);
-  assert.ok(badAction.content[0]?.text.includes("未知 action"));
+  assert.ok(resultTextOf(badAction.content).includes("未知 action"));
 });
 
 test("Context：collectProjectMemory 注入跨会话记忆，assembleSession 传导", async () => {
@@ -512,7 +517,7 @@ test("Tool：read 未读完时提示剩余行数与续读 offset", async () => {
     { cwd: dir, signal: new AbortController().signal },
   );
   assert.ok(!result.isError);
-  const text = result.content[0]?.text ?? "";
+  const text = resultTextOf(result.content);
   assert.ok(text.includes("共 10 行"));
   assert.ok(text.includes("后续还有 7 行未读"));
   assert.ok(text.includes("offset=4"));
@@ -526,7 +531,7 @@ test("Tool：read 二进制文件给出媒体格式提示", async () => {
     { cwd: dir, signal: new AbortController().signal },
   );
   assert.ok(result.isError);
-  const text = result.content[0]?.text ?? "";
+  const text = resultTextOf(result.content);
   assert.ok(text.includes("无法按文本读取"));
   assert.ok(text.includes(".png"));
 });
@@ -600,7 +605,7 @@ test("Permission：桌面端审批——拒绝时工具不执行且广播审批�
     (m): m is Extract<typeof m, { role: "toolResult" }> => m.role === "toolResult",
   );
   assert.ok(toolResult !== undefined && toolResult.isError);
-  assert.ok(toolResult.content[0]?.text.includes("审批"));
+  assert.ok(resultTextOf(toolResult.content).includes("审批"));
 });
 
 test("Permission：桌面端审批——「本会话全部允许」后续不再询问", async () => {

@@ -2,6 +2,34 @@
 
 给编码代理看的仓库约定。动手改代码前先读完，能省掉大部分返工。
 
+## Computer Use
+
+如果特斯拉可以使用视觉方案实现自动驾驶，那么Computer Use也可以使用视觉方案实现自动操作电脑。
+
+这条愿景的落地形态是**一条独立的工具通道**，不是替换现有工具：
+
+- **分层原则**：文本通道优先（read/write/edit/bash 等——token 便宜、可回滚、可检索）；
+  视觉通道兜底，只在「没有文本入口的场景」启用：桌面 GUI 应用、无 CLI 的软件、
+  用户要求"帮我点这里/自动操作这个软件"。UI-TARS-2 技术报告同样把「纯 GUI 不够用、
+  要接文件系统和终端」列为核心设计——两条通道是互补，不是二选一。
+- **感知端 `screenshot`**（只读）：截取整个虚拟屏，返回 JPEG 图片 + 尺寸。
+  坐标语义：模型看到的截图左上角为 `(0,0)`，harness 不做任何坐标换算。
+- **执行端 `computer`**（mutating）：click / doubleClick / rightClick / type / hotkey /
+  scroll 六个动作，坐标必须来自最近一次 screenshot。内部把图片坐标加上虚拟屏原点
+  换算成物理像素，两端 `SetProcessDPIAware` 保证高 DPI 一致。
+  两者都是 Windows 实现（PowerShell，零 npm 依赖）。
+- **Permission**：`computer` 改变真实桌面状态且**没有 git 回滚**——桌面端必须过
+  `approvalGate`；CLI 无审批门，靠动作留痕 + 屏幕变化可见兜底。这是五支柱里
+  「不可逆操作过人」的直接案例，不要为了"流畅"给它开后门。
+- **Context 成本**：一张截图约 1.5K token。`transformContext` 压缩旧轮次时会把
+  历史截图替换成占位文本（需要时重新 screenshot）——这是有意行为，不要"修复"它。
+- **坐标算法基准**：若未来接入 UI-TARS 系模型（其输出在 smart_resize 坐标系，
+  而非截图原始像素），坐标换算必须以对拍验证过的复刻实现为准（对拍 34/34：
+  `.workbuddy/tmp/uitars/uitars-coords.ts` 对齐 `bytedance/UI-TARS`
+  `codes/ui_tars/action_parser.py`；正式启用前迁入 `src/tools/` 并补单测）。
+  三个坑：像素预算须与推理端一致、Python round 是银行家舍入、
+  原版 `origin_resized_*` 参数实际要传原始分辨率。
+
 ## 这是什么
 
 一个用 TypeScript 写的终端编码代理：外层循环处理一轮轮用户请求，内层循环处理当前请求里
@@ -100,8 +128,8 @@ g/
 │   │   ├── mock.ts               离线测试与 print 模式
 │   │   ├── index.ts              resolveModel + providers 表
 │   │   └── doc/                  子模块文档（README.md）
-│   ├── tools/                  7 个内置工具
-│   │   ├── types.ts              Tool 接口 + ok() / fail()
+│   ├── tools/                  9 个内置工具
+│   │   ├── types.ts              Tool 接口 + ok() / fail() / okImage()
 │   │   ├── validate.ts           JSON Schema 参数校验
 │   │   ├── fs-utils.ts           resolvePath / truncateText / 跳过隐藏目录
 │   │   ├── glob-matcher.ts       glob 模式 → 正则
@@ -112,6 +140,8 @@ g/
 │   │   ├── glob.ts               走 fs-utils 的 walk
 │   │   ├── grep.ts               ripgrep 后端
 │   │   ├── memory.ts             跨会话记忆（追加式存储，写入项目根 MEMORY.md）
+│   │   ├── screenshot.ts         Computer Use 感知端：截屏 → JPEG（Windows）
+│   │   ├── computer.ts           Computer Use 执行端：鼠标/键盘/滚轮（Windows）
 │   │   ├── index.ts              TOOL_REGISTRY + ToolName 派生源
 │   │   └── doc/                  子模块文档（README.md）
 │   ├── ui/                     终端交互

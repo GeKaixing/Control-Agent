@@ -9,12 +9,43 @@ import type { JsonSchema, LlmMessage, LlmTool, StreamFn } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 
+/**
+ * 401/403 且没有有效 key 时附中文指引。apiKey="EMPTY" 是桌面端「自定义模型」
+ * 弹层留空 key 的占位约定（本地端点如 ollama 场景），远程端点收到必然拒——
+ * 把「为什么 401」直接告诉用户，而不是让他对着一屏端点英文 JSON 猜。
+ */
+function missingKeyHint(model: ModelRef): string {
+  const key = model.apiKey ?? "";
+  if (key.length > 0 && key !== "EMPTY") return "";
+  return "\n\n↳ 当前模型没有配置 API KEY：打开「自定义模型」补填后重试（仅本地端点如 ollama 可留空）";
+}
+
+/**
+ * 协议错配识别：openai 适配器发出的请求，响应体却是 Anthropic 协议专属信封
+ * （{"type":"error","error":{...}}，OpenAI 家族的错误体是 {"error":{...}}，
+ * 没有顶层 type 字段）——说明 baseUrl 指向 Anthropic 协议上游但协议留了默认
+ * openai（POST /chat/completions 打到没有该路由的端点，很多中继回 500 而非 404）。
+ * 全量 detail 才解析（展示仍截断），解析失败一律不提示，避免误伤。
+ */
+function protocolMismatchHint(detail: string): string {
+  try {
+    const parsed = JSON.parse(detail) as { type?: unknown; error?: unknown };
+    if (parsed?.type === "error" && typeof parsed.error === "object" && parsed.error !== null) {
+      return "\n\n↳ 响应体是 Anthropic 协议的错误格式，但请求走的是 OpenAI（chat-completions）协议——接口地址与协议不匹配：打开「自定义模型」把协议切到 anthropic（接口地址填根路径、不带 /v1），或换成该端点 chat-completions 家族的模型；若本来就是 anthropic 上游中继，也可能是上游暂时故障，可稍后重试";
+    }
+  } catch {
+    // 非 JSON 响应体（HTML 错误页等）不做判断
+  }
+  return "";
+}
+
 interface OpenAiTool {
   type: "function";
   function: { name: string; description: string; parameters: JsonSchema };
 }
 
-function toOpenAiMessages(systemPrompt: string, messages: LlmMessage[]): unknown[] {
+/** 导出供测试对拍：统一消息 → OpenAI 请求消息 */
+export function toOpenAiMessages(systemPrompt: string, messages: LlmMessage[]): unknown[] {
   const out: unknown[] = [{ role: "system", content: systemPrompt }];
 
   for (const m of messages) {
@@ -67,17 +98,30 @@ function toOpenAiMessages(systemPrompt: string, messages: LlmMessage[]): unknown
       continue;
     }
 
-    // toolResult：OpenAI 要求每个工具调用一条独立的 role=tool 消息
+    // toolResult：OpenAI 要求每个工具调用一条独立的 role=tool 消息。
+    // 图片块转成 image_url part；纯文本保持字符串（最大端点兼容性）。
     for (const c of m.content) {
       if (c.type !== "toolResult") continue;
       const tr = c as {
         toolCallId: string;
-        content: { type: string; text: string }[];
+        content: { type: string; text: string; dataUrl?: string }[];
       };
+      const parts: unknown[] = [];
+      for (const x of tr.content) {
+        if (x.type === "image" && typeof x.dataUrl === "string") {
+          parts.push({ type: "image_url", image_url: { url: x.dataUrl } });
+        } else if (x.type === "text") {
+          parts.push({ type: "text", text: x.text });
+        }
+      }
+      const content =
+        parts.length === 1 && (parts[0] as { type: string }).type === "text"
+          ? (parts[0] as { text: string }).text
+          : parts;
       out.push({
         role: "tool",
         tool_call_id: tr.toolCallId,
-        content: tr.content.map((x) => x.text).join("\n"),
+        content,
       });
     }
   }
@@ -175,9 +219,13 @@ export const openaiStream: StreamFn = async function* (options) {
 
   if (!response.ok || response.body === null) {
     const detail = await response.text().catch(() => "");
+    const hint =
+      response.status === 401 || response.status === 403
+        ? missingKeyHint(model)
+        : protocolMismatchHint(detail);
     const message = acc.finish(
       "error",
-      `OpenAI ${response.status}: ${detail.slice(0, 500)}`,
+      `OpenAI ${response.status}: ${detail.slice(0, 500)}${hint}`,
     );
     yield { type: "error", reason: "error", error: message };
     return;

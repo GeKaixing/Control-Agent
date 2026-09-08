@@ -91,6 +91,11 @@ interface AgentOptions {
     注入 `[中途插入指令]` 前缀
 - `toolcall_end` 事件里**只有最终解析出的 `ToolCallSummary`**，原 JSON 字符串在适配器里已经被
   `StreamAccumulator` 消化掉了——`renderer.ts` 也只看到 `name` 与 `arguments` 这两份数据。
+- **模型流失败的唯一真相源是 `stream` error 事件**：`callModel()` 对每条失败路径（适配器 yield
+  error / 流抛异常 / 空流一个事件都没出）都会补发 `{ type: "error", reason, error }`，
+  `turn_end.message.errorMessage` 只是同一失败的落树副本。`reason` 必须如实区分
+  `error` / `aborted`——桌面端显示层靠它过滤「用户主动中断不算错误」；显示端因此
+  **不该**再从 `turn_end` 里二次挖错误，否则重复。
 
 ## 如何扩展
 

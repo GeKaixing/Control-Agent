@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>周末时光 - 放松身心，享受生活</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+        }
+        
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        header {
+            text-align: center;
+            padding: 60px 20px;
+            color: white;
+        }
+        
+        h1 {
+            font-size: 3.5rem;
+            margin-bottom: 20px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            animation: fadeInUp 1s ease-out;
+        }
+        
+        .subtitle {
+            font-size: 1.5rem;
+            opacity: 0.9;
+            margin-bottom: 40px;
+            animation: fadeInUp 1s ease-out 0.2s both;
+        }
+        
+        .hero {
+            background: rgba(255,255,255,0.15);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 40px;
+            margin: 40px 0;
+            color: white;
+            animation: fadeInUp 1s ease-out 0.4s both;
+        }
+        
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+            margin: 50px 0;
+        }
+        
+        .feature-card {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            animation: fadeInUp 1s ease-out 0.6s both;
+        }
+        
+        .feature-card:hover {
+            transform: translateY(-10px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.15);
+        }
+        
+        .feature-icon {
+            font-size: 3rem;
+            margin-bottom: 20px;
+            display: block;
+        }
+        
+        .feature-title {
+            font-size: 1.5rem;
+            margin-bottom: 15px;
+            color: #2d3748;
+        }
+        
+        .feature-desc {
+            color: #4a5568;
+            font-size: 1.1rem;
+        }
+        
+        .cta-button {
+            background: linear-gradient(135deg, #4299e1 0%, #3182ce 100%);
+            color: white;
+            border: none;
+            padding: 15px 40px;
+            font-size: 1.2rem;
+            border-radius: 50px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+            margin-top: 30px;
+            box-shadow: 0 5px 15px rgba(66, 153, 225, 0.4);
+        }
+        
+        .cta-button:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 25px rgba(66, 153, 225, 0.6);
+        }
+        
+        footer {
+            text-align: center;
+            padding: 40px;
+            color: white;
+            opacity: 0.8;
+            font-size: 1.1rem;
+        }
+        
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 2.5rem;
+            }
+            
+            .subtitle {
+                font-size: 1.2rem;
+            }
+            
+            .hero {
+                padding: 30px 20px;
+            }
+            
+            .features {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>周末时光</h1>
+            <p class="subtitle">放下工作，拥抱生活，让每个周末都成为美好的回忆</p>
+        </header>
+        
+        <section class="hero">
+            <h2>为什么周末如此重要？</h2>
+            <p style="font-size: 1.2rem; margin-top: 20px;">
+                周末是我们从忙碌工作中抽身，重新充电的宝贵时光。无论是与家人共度温馨时刻，还是独自探索兴趣爱好，周末都能为我们注入新的活力，让我们以更好的状态迎接新的一周。
+            </p>
+        </section>
+        
+        <section class="features">
+            <div class="feature-card">
+                <span class="feature-icon">🌿</span>
+                <h3 class="feature-title">亲近自然</h3>
+                <p class="feature-desc">走进公园、山林或海边，感受大自然的宁静与美好。新鲜的空气和美丽的风景能有效缓解压力，让身心得到放松。</p>
+            </div>
+            
+            <div class="feature-card">
+                <span class="feature-icon">👨‍👩‍👧‍👦</span>
+                <h3 class="feature-title">家庭时光</h3>
+                <p class="feature-desc">与家人一起做饭、看电影、玩游戏或外出游玩。这些简单的时刻往往成为最珍贵的回忆，增进家人之间的感情。</p>
+            </div>
+            
+            <div class="feature-card">
+                <span class="feature-icon">🎨</span>
+                <h3 class="feature-title">发展爱好</h3>
+                <p class="feature-desc">利用周末时间学习新技能或深入发展已有爱好。无论是绘画、音乐、阅读还是运动，都能丰富我们的生活。</p>
+            </div>
+            
+            <div class="feature-card">
+                <span class="feature-icon">🧘</span>
+                <h3 class="feature-title">身心平衡</h3>
+                <p class="feature-desc">通过冥想、瑜伽或简单的休息来调整身心状态。周末是修复身心疲劳、恢复精力的最佳时机。</p>
+            </div>
+            
+            <div class="feature-card">
+                <span class="feature-icon">📚</span>
+                <h3 class="feature-title">自我提升</h3>
+                <p class="feature-desc">阅读一本好书、参加线上课程或学习新知识。周末的安静时光非常适合个人成长和思考。</p>
+            </div>
+            
+            <div class="feature-card">
+                <span class="feature-icon">🎉</span>
+                <h3 class="feature-title">社交娱乐</h3>
+                <p class="feature-desc">与朋友聚会、参加社区活动或尝试新餐厅。社交互动能带来快乐，丰富我们的周末生活。</p>
+            </div>
+        </section>
+        
+        <div style="text-align: center; margin: 50px 0;">
+            <a href="#" class="cta-button">开始规划你的周末</a>
+        </div>
+        
+        <footer>
+            <p>© 2026 周末时光 - 珍惜每个周末，享受美好生活</p>
+            <p style="margin-top: 10px; font-size: 0.9rem;">生活不止眼前的忙碌，还有诗和远方的周末</p>
+        </footer>
+    </div>
+</body>
+</html>

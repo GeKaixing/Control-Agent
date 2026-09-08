@@ -29,6 +29,7 @@ const CH = {
   NEW_SESSION: "desktop:newSession",
   LIST_FILES: "desktop:listFiles",
   LIST_MODELS: "desktop:listModels",
+  LIST_CUSTOM_MODELS: "desktop:listCustomModels",
   DICTATE_START: "desktop:dictateStart",
   DICTATE_STOP: "desktop:dictateStop",
   RESIZE_WINDOW: "desktop:resizeWindow",
@@ -43,6 +44,9 @@ const CH = {
 };
 
 const api = {
+  // 当前平台（darwin / win32 / linux）：渲染层按平台适配标题栏
+  // （darwin 红绿灯占位 pl-20；win32 走 WCO，用 windowControlsOverlay 拿按钮宽度）。
+  platform: process.platform,
   submit(text, attachments) {
     return ipcRenderer.invoke(CH.SUBMIT, text, attachments ?? []);
   },
@@ -96,6 +100,9 @@ const api = {
   },
   listModels(endpoint, refresh) {
     return ipcRenderer.invoke(CH.LIST_MODELS, endpoint, refresh === true);
+  },
+  listCustomModels(params) {
+    return ipcRenderer.invoke(CH.LIST_CUSTOM_MODELS, params);
   },
   startDictation() {
     return ipcRenderer.invoke(CH.DICTATE_START);

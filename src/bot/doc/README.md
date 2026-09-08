@@ -35,7 +35,8 @@ iLink 通道（`ilinkai.weixin.qq.com`），**不是** Web 微信协议的自动
 - **context_token 磁盘缓存**：iLink 要求回复 echo 对端最新 context_token，
   按 account+peer 存 `<account>.context-tokens.json`，重启可续；发送时若报会话过期，
   去掉 context_token 降级重试一次。
-- **双重去重**：message_id + 内容 md5 指纹（上游会用新 id 重发同文），TTL 300s。
+- **双重去重**：message_id（TTL 5min，挡游标回退重投递）+ 内容 md5 指纹（TTL 15s，
+  只挡上游秒级重发同文——窗口故意短，避免吞掉用户在窗口内连发的同文提问）。
 - **引用展开**：ref_msg 的引用文本/媒体标题并入正文前缀。
 
 v1 未移植（需要时从 hermes weixin.py 继续）：媒体收发（AES-128-ECB CDN）、

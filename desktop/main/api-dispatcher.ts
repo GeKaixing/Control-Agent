@@ -34,7 +34,8 @@ export type ApiMethodName =
   | "switchTo"
   | "listSessions"
   | "listFiles"
-  | "listModels";
+  | "listModels"
+  | "listCustomModels";
 
 /**
  * 调用一个会话 API。
@@ -146,6 +147,19 @@ export async function dispatchApi(
       const endpoint = args[0] as EndpointId | undefined;
       const refresh = args[1];
       return session.listModels(endpoint ?? "mock", refresh === true);
+    }
+    case "listCustomModels": {
+      const raw = args[0] as Partial<CustomModelParams> | undefined;
+      if (raw === null || typeof raw !== "object") {
+        return { endpoint: "openai", url: "", models: [], error: "参数缺失" };
+      }
+      return session.listCustomModels({
+        baseURL: typeof raw.baseURL === "string" ? raw.baseURL : "",
+        apiKey: typeof raw.apiKey === "string" ? raw.apiKey : undefined,
+        ...(typeof raw.protocol === "string"
+          ? { protocol: raw.protocol as CustomModelParams["protocol"] }
+          : {}),
+      });
     }
     default:
       throw new Error(`未知方法: ${method}`);

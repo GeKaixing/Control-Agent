@@ -160,6 +160,12 @@ export class BotRunner {
       for (const part of splitReply(answer, this.maxReplyChars)) {
         await this.adapter.sendText(msg.chatId, part);
       }
+      // 模型中途出错但已吐出部分正文：补一条错误说明，别让半截回答装作完整
+      if (output.errors.length > 0) {
+        const raw = output.errors[0] ?? "未知错误";
+        const detail = raw.length > 300 ? `${raw.slice(0, 300)}…` : raw;
+        await this.adapter.sendText(msg.chatId, `⚠️ 本轮模型中途出错，回复可能不完整：${detail}`);
+      }
       return;
     }
     // 无正文但有报错：把错误摘要发回去，别让消息石沉大海

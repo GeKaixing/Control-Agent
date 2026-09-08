@@ -14,7 +14,6 @@ import {
 import { cn } from "../lib/utils";
 import { useSessionStore } from "../store";
 import { ModeToggle } from "./ModeToggle";
-import { PauseButton } from "./PauseButton";
 import { EndpointModelMenu } from "./EndpointModelMenu";
 import { ToolsPanel } from "./ToolsPanel";
 import { ContextBar, ContextUsageBar } from "./ContextBar";
@@ -209,7 +208,9 @@ export function Composer({
     // plan_pending 状态下不允许直接 send，由右侧「继续」按钮接管。
     if (status === "plan_pending") return;
     const trimmed = text.trim();
-    if ((trimmed.length === 0 && attachments.length === 0) || status === "running") return;
+    // running 也放行：App.handleSubmit 会分流成 steer（运行中插话，立即生效）。
+    // 之前这里 return 把运行中输入整个吞掉——「运行时再输入没反应」就是它。
+    if (trimmed.length === 0 && attachments.length === 0) return;
     // 入栈（去重、空 query 跳过）
     if (trimmed.length > 0) {
       const arr = historyRef.current;
@@ -548,15 +549,6 @@ export function Composer({
           <div className="min-w-0 flex-1" />
 
           <div className="ml-auto flex shrink-0 items-center gap-1">
-            {info !== null && (
-              <>
-                <PauseButton
-                  paused={paused}
-                  visible={isRunning}
-                  onToggle={() => void togglePaused(!paused)}
-                />
-              </>
-            )}
             <MicButton
               dictating={dictation?.active ?? false}
               errorMessage={dictation?.errorMessage ?? null}
@@ -570,15 +562,28 @@ export function Composer({
             >
               <FilePlus className="h-3.5 w-3.5" />
             </button>
+            {/* 运行态主按钮二态合一：跑着 → ■ 点击停止；已暂停 → ▶ 点击继续。
+                （原独立 PauseButton 已并入这里，暂停后点 ▶ 恢复） */}
             {isRunning ? (
-              <button
-                type="button"
-                onClick={onAbort}
-                title="停止"
-                className="flex h-8 w-8 items-center justify-center rounded-full bg-foreground text-background transition-colors hover:opacity-90"
-              >
-                <Square className="h-3 w-3 fill-current" />
-              </button>
+              paused ? (
+                <button
+                  type="button"
+                  onClick={() => void togglePaused(false)}
+                  title="继续输出"
+                  className="flex h-8 w-8 items-center justify-center rounded-full bg-foreground text-background transition-colors hover:opacity-90"
+                >
+                  <Play className="h-3.5 w-3.5 fill-current" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onAbort}
+                  title="停止"
+                  className="flex h-8 w-8 items-center justify-center rounded-full bg-foreground text-background transition-colors hover:opacity-90"
+                >
+                  <Square className="h-3 w-3 fill-current" />
+                </button>
+              )
             ) : isPlanPending ? (
               <button
                 type="button"

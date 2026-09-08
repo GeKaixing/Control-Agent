@@ -30,7 +30,12 @@ import {
   listSessions,
   loadSessionInto,
   maxContextTokensFor,
+  modelSpecString,
   pathToRoot,
+  readSavedCustomModel,
+  readSavedModelSpec,
+  saveCustomModel,
+  saveModelSpec,
   saveSession,
   sessionFileExists,
   sessionsDir,
@@ -39,8 +44,14 @@ import {
   transformContext,
 } from "../src/context/index.js";
 import { convertToLlm } from "../src/agent/convert.js";
+import { toOpenAiMessages } from "../src/providers/openai.js";
 import { createMockStream } from "../src/providers/mock.js";
-import { lookupContextWindow, parseModelSpec, resolveModel } from "../src/providers/index.js";
+import {
+  lookupContextWindow,
+  lookupKnownContextWindow,
+  parseModelSpec,
+  resolveModel,
+} from "../src/providers/index.js";
 import type { StreamEvent, StreamFn, StreamOptions } from "../src/providers/types.js";
 import { allTools, bashTool, editTool, globTool, grepTool, readTool, resolveShell, writeTool, type ToolName } from "../src/tools/index.js";
 import type { Tool } from "../src/tools/types.js";
@@ -60,6 +71,11 @@ import type {
 import { emptyUsage } from "../src/types.js";
 
 import { test } from "./registry.js";
+
+/** 取工具结果内容里的全部文本（content 现在可能含 screenshot 返回的图片块） */
+function resultText(content: { type: string; text?: string }[]): string {
+  return content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("");
+}
 // 加载子用例文件：import 时它们就调 test() 把自己注册进 registry。
 // 这一段就是子用例的唯一接线点；加新分类的子文件时，加一行 import 就够了。
 import "./cli-print.js";
@@ -134,13 +150,13 @@ test("read: 行号与 offset/limit", async () => {
 
   const full = await readTool.execute({ path: file }, { cwd: dir, signal: noSignal() });
   assert.equal(full.isError, false);
-  assert.match(full.content[0]?.text ?? "", /1\tone/);
+  assert.match(resultText(full.content), /1\tone/);
 
   const part = await readTool.execute(
     { path: "a.txt", offset: 2, limit: 2 },
     { cwd: dir, signal: noSignal() },
   );
-  const text = part.content[0]?.text ?? "";
+  const text = resultText(part.content);
   assert.match(text, /2\ttwo/);
   assert.match(text, /3\tthree/);
   assert.doesNotMatch(text, /4\tfour/);
@@ -189,7 +205,7 @@ test("edit: 唯一匹配才替换", async () => {
     { cwd: dir, signal: noSignal() },
   );
   assert.equal(dup.isError, true);
-  assert.match(dup.content[0]?.text ?? "", /出现 2 次/);
+  assert.match(resultText(dup.content), /出现 2 次/);
 
   const missing = await editTool.execute(
     { path: file, oldString: "zzz", newString: "x" },
@@ -215,21 +231,21 @@ test("bash: 成功、失败与超时", async () => {
     { cwd: dir, signal: noSignal() },
   );
   assert.equal(good.isError, false);
-  assert.match(good.content[0]?.text ?? "", /bash-ok/);
+  assert.match(resultText(good.content), /bash-ok/);
 
   const bad = await bashTool.execute(
     { command: "exit 3" },
     { cwd: dir, signal: noSignal() },
   );
   assert.equal(bad.isError, true);
-  assert.match(bad.content[0]?.text ?? "", /退出码 3/);
+  assert.match(resultText(bad.content), /退出码 3/);
 
   const slow = await bashTool.execute(
     { command: "sleep 5", timeout: 1000 },
     { cwd: dir, signal: noSignal() },
   );
   assert.equal(slow.isError, true);
-  assert.match(slow.content[0]?.text ?? "", /超时/);
+  assert.match(resultText(slow.content), /超时/);
 });
 
 // -------------------------------------------------------- glob / grep
@@ -245,7 +261,7 @@ test("glob / grep 工具在真实目录上工作", async () => {
     { pattern: "**/*.ts" },
     { cwd: dir, signal: noSignal() },
   );
-  const listedText = listed.content[0]?.text ?? "";
+  const listedText = resultText(listed.content);
   assert.match(listedText, /src\/index\.ts/);
   assert.match(listedText, /src\/lib\/util\.ts/);
   assert.doesNotMatch(listedText, /README\.md/);
@@ -254,14 +270,14 @@ test("glob / grep 工具在真实目录上工作", async () => {
     { pattern: "function\\s+target", include: "**/*.ts" },
     { cwd: dir, signal: noSignal() },
   );
-  assert.match(found.content[0]?.text ?? "", /src\/lib\/util\.ts:1/);
+  assert.match(resultText(found.content), /src\/lib\/util\.ts:1/);
 
   const none = await grepTool.execute(
     { pattern: "not-there-anywhere" },
     { cwd: dir, signal: noSignal() },
   );
   assert.equal(none.isError, false);
-  assert.match(none.content[0]?.text ?? "", /没有匹配/);
+  assert.match(resultText(none.content), /没有匹配/);
 });
 
 // ------------------------------------------------------------ convert
@@ -458,7 +474,7 @@ test("transformContext: 旧轮超长成功工具结果替换成指针，error �
     (m) => m.role === "toolResult" && m.toolCallId === "a1",
   );
   assert.ok(success && success.role === "toolResult");
-  const successText = success.content.map((c) => c.text).join("");
+  const successText = resultText(success.content);
   assert.match(successText, /工具结果已省略/);
   assert.match(successText, /read/);
   assert.match(successText, /2000 字符/);
@@ -468,7 +484,7 @@ test("transformContext: 旧轮超长成功工具结果替换成指针，error �
     (m) => m.role === "toolResult" && m.toolCallId === "a2",
   );
   assert.ok(err && err.role === "toolResult");
-  const errText = err.content.map((c) => c.text).join("");
+  const errText = resultText(err.content);
   assert.doesNotMatch(errText, /工具结果已省略/, "error 结果不替换成指针");
   assert.ok(errText.length <= 600, "error 结果仍走头尾截断");
 
@@ -638,8 +654,8 @@ test("context: Agent.compact 把历史摘要写回会话树新 Root，旧分支�
   assert.equal(state.currentNodeId, state.rootId, "★ 推进到摘要节点");
 
   // 压缩失败路径：模型报错 → 状态原样不动。
-  // maxStreamRetries: 0——失败重试的退避 sleep 是 unref 定时器，裸测试里
-  // 事件循环空了进程会直接退出（生产环境 REPL/Electron 有句柄保活，不受影响）。
+  // maxStreamRetries: 0——本用例不关心重试，0 免去退避等待（且避免 unref 缺失时
+  // 裸测试进程多活 200ms）。
   const before = { rootId: state.rootId, count: state.nodes.size, messages: state.messages.length };
   const failAgent = new Agent({
     state,
@@ -704,6 +720,14 @@ test("providers: lookupContextWindow 粗表命中与兜底", () => {
   assert.equal(lookupContextWindow("kimi-k2-0905-preview"), 256_000);
   assert.equal(lookupContextWindow("mock-1"), 32_000);
   assert.equal(lookupContextWindow("totally-unknown-model"), 1_000_000, "用户定调：未知模型 1M 兜底（误判大只浪费余量，误判小白丢历史）");
+});
+
+test("providers: lookupKnownContextWindow 严格版——命中才返回，未知 undefined", () => {
+  assert.equal(lookupKnownContextWindow("deepseek-chat"), 128_000);
+  assert.equal(lookupKnownContextWindow("kimi-k2-0905-preview"), 256_000);
+  assert.equal(lookupKnownContextWindow("openai/gpt-4o-mini"), 128_000, "openrouter 前缀 id 不影响家族正则命中");
+  assert.equal(lookupKnownContextWindow("totally-unknown-model"), undefined, "未知模型不猜：展示值宁缺毋滥");
+  assert.equal(lookupKnownContextWindow("glm-5.3"), undefined, "不在粗表的家族留空");
 });
 
 test("providers: resolveModel 统一填充 contextWindow（显式值不覆盖）", () => {
@@ -884,7 +908,7 @@ test("context: 自动 compact 失败 → 本次 run 停用并落回机械裁剪"
     onEvent: (e) => {
       events.push(e);
     },
-    maxStreamRetries: 0, // 失败重试的退避是 unref 定时器，裸测试里会提前退出进程
+    maxStreamRetries: 0, // 本用例不关心重试：0 免去退避等待
     transform: { maxContextTokens: 7000, reservedTokens: 100 },
   });
   agent.enqueueUser("继续");
@@ -1104,6 +1128,8 @@ test("providers: parseModelSpec 支持末段 :strong/:budget 档位", () => {
 
 test("providers: parseModelSpec 识别厂商预设（baseUrl / key env / 别名 / 无 key 端点）", () => {
   const saved = process.env["DEEPSEEK_API_KEY"];
+  const savedZen = process.env["OPENCODE_API_KEY"];
+  const savedGo = process.env["OPENCODE_GO_API_KEY"];
   try {
     // 有 key：厂商前缀 → 对应 provider + 默认 baseUrl + key env
     process.env["DEEPSEEK_API_KEY"] = "sk-test";
@@ -1117,6 +1143,28 @@ test("providers: parseModelSpec 识别厂商预设（baseUrl / key env / 别名 
     const bare = parseModelSpec("kimi:");
     assert.equal(bare.provider, "moonshot");
     assert.equal(bare.id, "kimi-k2-0905-preview");
+
+    // opencode（OpenCode Zen，别名 zen）：默认模型 + key env
+    process.env["OPENCODE_API_KEY"] = "sk-zen-test";
+    const zen = parseModelSpec("zen:");
+    assert.equal(zen.provider, "opencode");
+    assert.equal(zen.id, "glm-5.3");
+    assert.equal(zen.baseUrl, "https://opencode.ai/zen/v1");
+    assert.equal(zen.apiKey, "sk-zen-test");
+
+    // opencode-go（OpenCode Go 订阅通道，别名 go）：base 带 /zen 段，key env 独立
+    process.env["OPENCODE_GO_API_KEY"] = "sk-go-test";
+    const go = parseModelSpec("go:");
+    assert.equal(go.provider, "opencode-go");
+    assert.equal(go.id, "glm-5.1");
+    assert.equal(go.baseUrl, "https://opencode.ai/zen/go/v1");
+    assert.equal(go.apiKey, "sk-go-test");
+
+    // 缺 key 降级提示用预设表的真实 env 名（id 带 "-"，不能从 provider 推导）
+    delete process.env["OPENCODE_GO_API_KEY"];
+    const goDegraded = resolveModel(parseModelSpec("go:"));
+    assert.ok(goDegraded.degraded?.includes("OPENCODE_GO_API_KEY"));
+    process.env["OPENCODE_GO_API_KEY"] = "sk-go-test";
 
     // ollama 本地端点：无需 key，填占位 key 不降级
     const local = parseModelSpec("ollama:qwen3");
@@ -1134,6 +1182,10 @@ test("providers: parseModelSpec 识别厂商预设（baseUrl / key env / 别名 
   } finally {
     if (saved !== undefined) process.env["DEEPSEEK_API_KEY"] = saved;
     else delete process.env["DEEPSEEK_API_KEY"];
+    if (savedZen !== undefined) process.env["OPENCODE_API_KEY"] = savedZen;
+    else delete process.env["OPENCODE_API_KEY"];
+    if (savedGo !== undefined) process.env["OPENCODE_GO_API_KEY"] = savedGo;
+    else delete process.env["OPENCODE_GO_API_KEY"];
   }
 });
 
@@ -1388,7 +1440,7 @@ test("端到端：mock 模型调用 bash 并把结果带回来", async () => {
 
   const toolResults = messages.filter((m) => m.role === "toolResult");
   assert.equal(toolResults.length, 1);
-  assert.match(toolResults[0]?.content.map((c) => c.text).join("") ?? "", /agent-ok/);
+  assert.match(resultText(toolResults[0]?.content ?? []), /agent-ok/);
 
   const assistants = messages.filter((m) => m.role === "assistant");
   const finalText = assistants[assistants.length - 1];
@@ -1435,7 +1487,7 @@ test("端到端：未知工具会把错误反馈给模型", async () => {
   const toolResults = messages.filter((m) => m.role === "toolResult");
   assert.equal(toolResults.length, 1);
   assert.equal(toolResults[0]?.isError, true);
-  assert.match(toolResults[0]?.content[0]?.text ?? "", /未知工具/);
+  assert.match(resultText(toolResults[0]?.content ?? []), /未知工具/);
 });
 
 test("串行 / 并行：只读工具可并行，开关可强制串行", async () => {
@@ -1577,7 +1629,7 @@ test("端到端：串行工具间隙的中途插话会打断剩余调用（pi �
   assert.equal(toolEnds.length, 2, "c1 执行 + c2 跳过，共两次 tool_end");
   const second = toolEnds[1];
   assert.ok(second?.type === "tool_end" && second.result.isError);
-  assert.match(second.result.content[0]?.text ?? "", /已跳过/);
+  assert.match(resultText(second.result.content), /已跳过/);
 
   // 事件：steering 在下一轮顶部广播（注入仍由内层循环统一做）
   assert.ok(events.some((e) => e.type === "steering" && e.texts[0] === "改方向"));
@@ -1602,7 +1654,7 @@ test("端到端：串行工具间隙的中途插话会打断剩余调用（pi �
   // c1 真执行了，c2 没执行（c2 若执行会返回 slow:b，但它的结果是跳过错误）
   const c1Result = msgs[c1Idx];
   assert.ok(c1Result?.role === "toolResult" && !c1Result.isError);
-  assert.match(c1Result.content[0]?.text ?? "", /slow:a/);
+  assert.match(resultText(c1Result.content), /slow:a/);
 
   // 最后一轮模型按新指令收尾
   const assistants = msgs.filter((m) => m.role === "assistant");
@@ -1647,9 +1699,9 @@ test("端到端：disabledTools 黑名单里的工具调用会返回 '已被禁�
   );
   assert.ok(bashError && bashError.role === "toolResult", "应有针对 bash 的工具结果");
   assert.equal(bashError.isError, true);
-  assert.match(bashError.content[0]?.text ?? "", /已被禁用/);
+  assert.match(resultText(bashError.content), /已被禁用/);
   // 「可用工具：」列表里不应再出现 bash
-  const available = bashError.content[0]?.text.split("可用工具：")[1] ?? "";
+  const available = resultText(bashError.content).split("可用工具：")[1] ?? "";
   assert.equal(available.split(/[\s,，]+/).includes("bash"), false);
 });
 
@@ -1693,7 +1745,7 @@ test("端到端：超过 maxToolResultChars 的工具结果会被截断", async 
 
   const toolResult = messages.find((m) => m.role === "toolResult");
   assert.ok(toolResult && toolResult.role === "toolResult");
-  const text = toolResult.content.map((c) => c.text).join("");
+  const text = resultText(toolResult.content);
   assert.ok(text.length < 1000, `截断后应远小于原长 20000，实际 ${text.length}`);
   assert.match(text, /输出已截断/);
   assert.match(text, /A{50,}/, "应保留 A 字符内容");
@@ -1735,7 +1787,7 @@ test("registry：拼写错误的工具名会在 runAgent 路径上走 '未知工
   const toolResult = messages.find((m) => m.role === "toolResult");
   assert.ok(toolResult && toolResult.role === "toolResult");
   assert.equal(toolResult.isError, true);
-  assert.match(toolResult.content[0]?.text ?? "", /未知工具/);
+  assert.match(resultText(toolResult.content), /未知工具/);
 });
 
 // ------------------------------------------------------------- markdown
@@ -1893,6 +1945,78 @@ test("print 模式：notice 与上下文裁剪只是警告，不影响退出码"
   assert.equal(out.exitCode, 0);
 });
 
+test("print 模式：流错误被重试恢复（turn_end 干净收尾）→ 不计失败", () => {
+  const out = createPrintOutput();
+  // 第 1 次尝试流失败 → agent 自动重试 → 重试成功 turn_end 干净收尾
+  out.onEvent({
+    type: "stream",
+    event: { type: "error", reason: "error", error: { ...textOnly(""), stopReason: "error" as const, errorMessage: "HTTP 502" } },
+  });
+  out.onEvent({ type: "turn_end", message: textOnly("重试成功后的回答") });
+
+  assert.deepEqual(out.errors, [], "恢复成功的一轮不应被记为失败");
+  assert.equal(out.exitCode, 0);
+});
+
+test("print 模式：流错误与 turn_end 同文去重", () => {
+  const out = createPrintOutput();
+  out.onEvent({
+    type: "stream",
+    event: { type: "error", reason: "error", error: { ...textOnly(""), stopReason: "error" as const, errorMessage: "调用模型失败：boom" } },
+  });
+  out.onEvent({
+    type: "turn_end",
+    message: { ...textOnly(""), stopReason: "error" as const, errorMessage: "调用模型失败：boom" },
+  });
+
+  assert.deepEqual(out.errors, ["调用模型失败：boom"], "同一次失败只记一条");
+  assert.equal(out.exitCode, 1);
+});
+
+test("agent: 空流（无任何事件）补发 stream error，错误对所有显示端可见", async () => {
+  const dir = await tempDir();
+  const state = createInitialState({ cwd: dir, model: { provider: "mock", id: "mock-1" }, tools: allTools });
+  const stream: StreamFn = async function* () {
+    // 一个事件都不 yield 就结束（空流）
+  };
+  const events: AgentEvent[] = [];
+  const agent = new Agent({ state, stream, onEvent: (e) => void events.push(e), maxStreamRetries: 0 });
+  agent.enqueueUser("hi");
+  await agent.run();
+
+  const streamErrors = events.flatMap((e) =>
+    e.type === "stream" && e.event.type === "error" ? [e.event] : [],
+  );
+  assert.equal(streamErrors.length, 1, "空流失败必须补发 error 事件");
+  assert.equal(streamErrors[0]?.reason, "error");
+  assert.equal(streamErrors[0]?.error.errorMessage, "模型没有返回任何内容");
+  const last = state.messages[state.messages.length - 1];
+  assert.ok(last?.role === "assistant" && last.stopReason === "error");
+  assert.equal(last.errorMessage, "模型没有返回任何内容");
+});
+
+test("agent: 流抛异常且已 abort → reason 如实标记 aborted（中断不算错误）", async () => {
+  const dir = await tempDir();
+  const state = createInitialState({ cwd: dir, model: { provider: "mock", id: "mock-1" }, tools: allTools });
+  let agentRef: Agent | undefined;
+  const stream: StreamFn = async function* () {
+    agentRef?.abort("测试中断");
+    throw new Error("连接被重置");
+  };
+  const events: AgentEvent[] = [];
+  const agent = new Agent({ state, stream, onEvent: (e) => void events.push(e), maxStreamRetries: 0 });
+  agentRef = agent;
+  agent.enqueueUser("hi");
+  await agent.run();
+
+  const streamErrors = events.flatMap((e) =>
+    e.type === "stream" && e.event.type === "error" ? [e.event] : [],
+  );
+  assert.equal(streamErrors.length, 1);
+  assert.equal(streamErrors[0]?.reason, "aborted", "中断必须标记 reason=aborted，显示层据此静默");
+  assert.equal(streamErrors[0]?.error.errorMessage, "已中断");
+});
+
 // ----------------------------------------------------- bash 跨平台 shell
 
 test("resolveShell: 非 win32 恒返回 bash -lc，与原行为字节级一致", () => {
@@ -1922,7 +2046,7 @@ test("bash 工具：非 win32 上能跑 echo bash-ok", async () => {
     );
     assert.equal(result.isError, false);
     assert.ok(
-      result.content.some((c) => c.text.includes("bash-ok")),
+      result.content.some((c) => c.type === "text" && c.text.includes("bash-ok")),
       `应该返回包含 bash-ok 的输出，得到 ${JSON.stringify(result.content)}`,
     );
   } finally {
@@ -2435,6 +2559,219 @@ test("openaiStream：透传 sessionId 为 x-opencode-session 头 + 自定义 UA"
   }
 });
 
+test("openaiStream：401 且无有效 key（含 EMPTY 占位）附中文指引；有 key 时只回端点原文", async () => {
+  const { openaiStream } = await import("../src/providers/openai.js");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    return {
+      ok: false,
+      status: 401,
+      text: async () => '{"error":{"message":"You didn\'t provide an API key."}}',
+    } as unknown as Response;
+  }) as unknown as typeof fetch;
+
+  const run = async (apiKey: string | undefined): Promise<string> => {
+    const gen = openaiStream({
+      model: { provider: "openai", id: "gpt-4o-mini", baseUrl: "https://api.example.com/v1", apiKey },
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      tools: [],
+      thinkingLevel: "low",
+    });
+    let errorMessage = "";
+    for await (const e of gen) {
+      if (e.type === "error") errorMessage = e.error.errorMessage ?? "";
+    }
+    return errorMessage;
+  };
+
+  try {
+    // EMPTY 占位（桌面端自定义模型留空 key 的约定）：401 指引必须到位
+    const noKey = await run("EMPTY");
+    assert.ok(noKey.includes("OpenAI 401"), "保留端点状态码原文");
+    assert.ok(noKey.includes("没有配置 API KEY"), `EMPTY 占位 401 应附指引，实际：${noKey}`);
+    const undefinedKey = await run(undefined);
+    assert.ok(undefinedKey.includes("没有配置 API KEY"), "apiKey 缺省同样附指引");
+    // 真实 key 被端点拒：不再误导用户去补 key（端点原文照旧）
+    const withKey = await run("sk-real");
+    assert.equal(withKey.includes("没有配置 API KEY"), false, "有 key 的 401 不应误导用户去补 key");
+    assert.ok(withKey.includes("You didn't provide an API key"), "端点原文保留");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("openaiStream：Anthropic 形状错误体（协议错配）附切换协议指引；OpenAI 形状错误体不附", async () => {
+  const { openaiStream } = await import("../src/providers/openai.js");
+  const originalFetch = globalThis.fetch;
+  let respondBody = "";
+  globalThis.fetch = (async () => {
+    return {
+      ok: false,
+      status: 500,
+      text: async () => respondBody,
+    } as unknown as Response;
+  }) as unknown as typeof fetch;
+
+  const run = async (): Promise<string> => {
+    const gen = openaiStream({
+      model: { provider: "openai", id: "glm-5.3", baseUrl: "https://relay.example.com/v1", apiKey: "sk-real" },
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      tools: [],
+      thinkingLevel: "low",
+    });
+    let errorMessage = "";
+    for await (const e of gen) {
+      if (e.type === "error") errorMessage = e.error.errorMessage ?? "";
+    }
+    return errorMessage;
+  };
+
+  try {
+    // 用户实报场景：openai 适配器 + Anthropic 信封 → 必须给出「协议切 anthropic」指引
+    respondBody = '{"type":"error","error":{"type":"error","message":"Internal server error"}}';
+    const mismatch = await run();
+    assert.ok(mismatch.includes("OpenAI 500"), "保留端点状态码原文");
+    assert.ok(
+      mismatch.includes("Anthropic 协议的错误格式"),
+      `Anthropic 信封 500 应附协议错配指引，实际：${mismatch}`,
+    );
+    assert.ok(mismatch.includes("协议切到 anthropic"), "指引必须包含可操作动作");
+    // OpenAI 家族形状（{"error":{...}}，无顶层 type）→ 不误伤
+    respondBody = '{"error":{"message":"Internal server error","type":"internal_error"}}';
+    const normal = await run();
+    assert.equal(
+      normal.includes("Anthropic 协议的错误格式"),
+      false,
+      `OpenAI 形状错误体不应误报协议错配，实际：${normal}`,
+    );
+    // 非 JSON（HTML 错误页）→ 静默跳过，不抛异常
+    respondBody = "<html>502 Bad Gateway</html>";
+    const html = await run();
+    assert.equal(html.includes("Anthropic 协议的错误格式"), false, "非 JSON 响应体不判断协议");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("responsesStream：/v1/responses 请求形状（instructions/扁平 tools/reasoning）+ 事件流 + usage", async () => {
+  const { responsesStream } = await import("../src/providers/responses.js");
+  const chunks = [
+    'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n',
+    'data: {"type":"response.output_text.delta","delta":"你好"}\n\n',
+    'data: {"type":"response.reasoning_summary_text.delta","delta":"想一下"}\n\n',
+    'data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"fc_1","name":"read"}}\n\n',
+    'data: {"type":"response.function_call_arguments.delta","delta":"{\\"path\\":\\"a.ts\\"}"}\n\n',
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"fc_1","name":"read","arguments":"{\\"path\\":\\"a.ts\\"}"}}\n\n',
+    'data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":8,"output_tokens_details":{"reasoning_tokens":3},"input_tokens_details":{"cached_tokens":4}}}}\n\n',
+  ];
+  const originalFetch = globalThis.fetch;
+  let capturedUrl = "";
+  let capturedHeaders: Record<string, string> = {};
+  let capturedBody: Record<string, unknown> = {};
+  globalThis.fetch = (async (url: unknown, init?: { headers?: Record<string, string>; body?: string }) => {
+    capturedUrl = String(url);
+    capturedHeaders = init?.headers ?? {};
+    capturedBody = JSON.parse(init?.body ?? "{}") as Record<string, unknown>;
+    const enc = new TextEncoder();
+    let i = 0;
+    return {
+      ok: true,
+      status: 200,
+      body: new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (i < chunks.length) controller.enqueue(enc.encode(chunks[i++]!));
+          else controller.close();
+        },
+      }),
+    } as unknown as Response;
+  }) as unknown as typeof fetch;
+
+  try {
+    const gen = responsesStream({
+      model: { provider: "openai-responses", id: "gpt-5.1", baseUrl: "https://api.example.com/v1", apiKey: "sk-x" },
+      systemPrompt: "sys-prompt",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "不回放" },
+            { type: "text", text: "上轮回复" },
+            { type: "toolCall", id: "fc_0", name: "glob", arguments: { pattern: "*.ts" } },
+          ],
+        },
+        { role: "toolResult", content: [{ type: "toolResult", toolCallId: "fc_0", toolName: "glob", isError: false, content: [{ type: "text", text: "结果" }] }] },
+        { role: "user", content: [{ type: "text", text: "继续" }] },
+      ],
+      tools: [{ name: "read", description: "读文件", parameters: { type: "object", properties: {} } }],
+      thinkingLevel: "medium",
+      maxTokens: 4096,
+    });
+    const events: StreamEvent[] = [];
+    for await (const e of gen) {
+      events.push(e);
+    }
+
+    // 请求形状：/responses 端点 + Bearer + instructions/扁平 tools/reasoning/max_output_tokens
+    assert.equal(capturedUrl, "https://api.example.com/v1/responses");
+    assert.equal(capturedHeaders["authorization"], "Bearer sk-x");
+    assert.equal(capturedBody["instructions"], "sys-prompt");
+    assert.equal(capturedBody["max_output_tokens"], 4096);
+    assert.deepEqual(capturedBody["reasoning"], { effort: "medium" });
+    const tools = capturedBody["tools"] as Array<Record<string, unknown>>;
+    assert.equal(tools.length, 1);
+    assert.equal(tools[0]!["type"], "function");
+    assert.equal(tools[0]!["name"], "read", "Responses 工具定义是扁平结构，name 在顶层");
+    // input：user 文本 / assistant thinking 不回放 / toolCall 独立 item / function_call_output
+    const input = capturedBody["input"] as Array<Record<string, unknown>>;
+    assert.equal(input.length, 5, "user + assistant(output_text) + function_call + function_call_output + user");
+    assert.deepEqual(input[0], { role: "user", content: "hi" });
+    assert.deepEqual(input[1], { role: "assistant", content: [{ type: "output_text", text: "上轮回复" }] });
+    assert.deepEqual(input[2], { type: "function_call", call_id: "fc_0", name: "glob", arguments: '{"pattern":"*.ts"}' });
+    assert.deepEqual(input[3], { type: "function_call_output", call_id: "fc_0", output: "结果" });
+
+    // 事件流：text → thinking → toolcall_delta → toolcall_end → done(toolUse)
+    const types = events.map((e) => e.type);
+    assert.deepEqual(types, ["start", "text_delta", "thinking_delta", "toolcall_delta", "toolcall_end", "done"]);
+    const toolEnd = events[4] as { type: "toolcall_end"; toolCall: { id: string; name: string; arguments: Record<string, unknown> } };
+    assert.equal(toolEnd.toolCall.id, "fc_1");
+    assert.equal(toolEnd.toolCall.name, "read");
+    assert.deepEqual(toolEnd.toolCall.arguments, { path: "a.ts" });
+    const done = events[5] as { type: "done"; reason: string; message: { usage: { input: number; output: number; cacheRead: number } } };
+    assert.equal(done.reason, "toolUse");
+    assert.equal(done.message.usage.input, 10);
+    assert.equal(done.message.usage.output, 8);
+    assert.equal(done.message.usage.cacheRead, 4, "input_tokens_details.cached_tokens 记入 cacheRead");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("toResponsesInput：user 图片转 input_image（纯字符串 URL）；toolResult 图片转占位", async () => {
+  const { toResponsesInput } = await import("../src/providers/responses.js");
+  const out = toResponsesInput([
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "看图" },
+        { type: "image", dataUrl: "data:image/png;base64,AAAA" } as never,
+      ],
+    },
+    { role: "toolResult", content: [{ type: "toolResult", toolCallId: "fc_9", toolName: "screenshot", isError: false, content: [{ type: "text", text: "截图" }, { type: "image", dataUrl: "data:image/png;base64,BBBB" } as never] }] },
+  ]);
+  const user = out[0] as { role: string; content: Array<{ type: string; image_url?: string }> };
+  assert.equal(user.content.length, 2);
+  assert.equal(user.content[1]!.type, "input_image");
+  assert.equal(user.content[1]!.image_url, "data:image/png;base64,AAAA", "Responses 的 image_url 是纯字符串");
+  const toolOut = out[1] as { type: string; call_id: string; output: string };
+  assert.equal(toolOut.type, "function_call_output");
+  assert.equal(toolOut.call_id, "fc_9");
+  assert.ok(toolOut.output.includes("截图"), "文本保留");
+  assert.ok(toolOut.output.includes("1 张图片"), "图片块转占位说明");
+});
+
 test("parseModelsResponse：gemini 端点的 models[] 格式（name 剥 models/ 前缀）", async () => {
   const { parseModelsResponse } = await import("../desktop/main/session.js");
   const out = parseModelsResponse(
@@ -2500,6 +2837,92 @@ test("setMode 真接入：mode 字段被持久化（下次 start 时由 assemble
   assert.equal(sm.getMode(), "plan");
 
   void cwd;
+});
+
+test("模型持久化钩子：setModel / setEndpoint 走 spec 版，setCustomModel 走完整参数版（互斥语义）", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: [],
+  });
+  const savedSpecs: string[] = [];
+  const savedCustoms: { provider: string; id: string; baseUrl: string; apiKey: string }[] = [];
+  const sm = new SessionManager(
+    { state, queue: new MessageQueue(), resolved: { model: { provider: "mock", id: "mock-1" }, stream: createMockStream({ delayMs: 0 }) } },
+    {
+      emit: () => {},
+      persistModel: (spec) => savedSpecs.push(spec),
+      persistCustomModel: (custom) => savedCustoms.push(custom),
+    },
+  );
+
+  sm.setModel("mock:abc");
+  assert.deepEqual(savedSpecs, ["mock:abc"], "setModel 成功后触发 spec 持久化钩子");
+  sm.setEndpoint("openai");
+  assert.deepEqual(savedSpecs, ["mock:abc", "openai:abc"], "setEndpoint 保留当前 model id 并触发钩子");
+
+  sm.setCustomModel({ baseURL: "https://custom.example/v1/", apiKey: "sk-x", model: "cm-1" });
+  assert.equal(savedSpecs.length, 2, "setCustomModel 不触发 spec 版钩子（互斥）");
+  assert.equal(savedCustoms.length, 1, "setCustomModel 触发完整参数持久化钩子（重启后可恢复）");
+  assert.deepEqual(
+    savedCustoms[0],
+    { provider: "openai", id: "cm-1", baseUrl: "https://custom.example/v1", apiKey: "sk-x" },
+    "参数取自归一后的 ModelRef（协议缺省 openai、尾斜杠已剥的真值）",
+  );
+
+  // 恢复场景：anthropic 协议 + contextWindow 覆写，同样完整落盘
+  sm.setCustomModel({
+    baseURL: "https://relay.example.com/v1",
+    apiKey: "sk-y",
+    model: "glm-5.3",
+    protocol: "anthropic",
+    contextWindow: "200k",
+  });
+  assert.equal(savedCustoms.length, 2);
+  assert.deepEqual(
+    savedCustoms[1],
+    { provider: "anthropic", id: "glm-5.3", baseUrl: "https://relay.example.com", apiKey: "sk-y", contextWindow: 200000 },
+    "anthropic 地址剥 /v1、contextWindow 解析为数字",
+  );
+});
+
+test("桌面端换模型真生效：submit 后请求用切换后的 ref（401 根因回归）", async () => {
+  const cwd = await tempDir();
+  const state = createInitialState({
+    cwd,
+    model: { provider: "mock", id: "mock-1" },
+    tools: [],
+  });
+  const queue = new MessageQueue();
+  const { deps } = makeWireCollector();
+
+  const sm = new SessionManager(
+    { state, queue, resolved: { model: { provider: "mock", id: "mock-1" }, stream: createMockStream({ delayMs: 0 }) } },
+    deps,
+  );
+
+  sm.setModel("mock:xyz");
+  await sm.submit("你好", []);
+  // setModel 换上的 mock 流默认 8ms/增量，一段回复要 ~1s：轮询等助手消息，不固定死等
+  let lastAssistant: AssistantMessage | undefined;
+  for (let i = 0; i < 100; i++) {
+    lastAssistant = [...sm.getState().messages]
+      .reverse()
+      .find((m): m is AssistantMessage => m.role === "assistant");
+    if (lastAssistant !== undefined) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.ok(lastAssistant, "应当有助手回复");
+  // Agent.callModel 用 state.model 发请求：不同步的话请求永远携带 bootstrap 旧 ref
+  //（自定义模型的 baseUrl / key 全丢 → 打到默认端点 401「没有提供 API key」）
+  assert.equal(sm.getState().model.id, "xyz", "state.model 必须同步为切换后的模型");
+  assert.equal(
+    lastAssistant.model,
+    "mock:xyz",
+    `流收到的必须是新 ref（mock 回显 provider:id），实际 ${lastAssistant.model}`,
+  );
+
+  await fs.rm(cwd, { recursive: true, force: true });
 });
 
 // ───────────── 多会话：newSession 归档 + switchSession 切换 ─────────────
@@ -2632,6 +3055,15 @@ test("parseModelsResponse：OpenAI 兼容格式解析；缺 id 跳过；坏结�
   const alias = parseModelsResponse({ data: [{ id: "m", context_length: 8192 }] });
   assert.equal(alias[0]?.contextWindow, 8192);
 
+  // 元数据缺失时用内核粗表严格补：识别的家族填值，未知家族留空（展示宁缺毋滥）
+  const hinted = parseModelsResponse({ data: [{ id: "deepseek-reasoner" }, { id: "some-obscure-model" }] });
+  assert.equal(hinted[0]?.contextWindow, 128_000, "deepseek 家族命中粗表");
+  assert.equal(hinted[1]?.contextWindow, undefined, "未知家族不显示猜出来的数字");
+
+  // 元数据给的值永远赢过粗表
+  const both = parseModelsResponse({ data: [{ id: "deepseek-chat", context_window: 131_072 }] });
+  assert.equal(both[0]?.contextWindow, 131_072, "端点元数据优先于粗表估值");
+
   // 坏结构必须 throw（fetchModelsFor 会转成 result.error，让前端回退静态预设）
   assert.throws(() => parseModelsResponse(null));
   assert.throws(() => parseModelsResponse({}));
@@ -2762,6 +3194,65 @@ test("info().contextWindow：自定义模型 baseUrl 直连 /models 的元数据
     requestedUrls.includes("https://custom.example.com/v1/models"),
     `应请求自定义 baseUrl 直连的 /models，实际：${JSON.stringify(requestedUrls)}`,
   );
+});
+
+test("listCustomModels：三协议 URL 推导与鉴权头；无 key 不带鉴权；非 http 前缀直接报错", async () => {
+  const state = createInitialState({ cwd: process.cwd(), model: { provider: "mock", id: "mock-1" }, tools: [] });
+  const queue = new MessageQueue();
+  const requested: Array<{ url: string; headers: Record<string, string> }> = [];
+  const fakeFetch = (async (url: string | URL, init?: { headers?: Record<string, string> }) => {
+    requested.push({ url: String(url), headers: init?.headers ?? {} });
+    // gemini 端点回 models[] 格式，其余回 openai 的 data[] 格式（parseModelsResponse 按协议分流）
+    const body = String(url).includes("generativelanguage")
+      ? { models: [{ name: "models/gemini-2.5-flash", displayName: "Gemini 2.5 Flash", inputTokenLimit: 1048576 }] }
+      : { object: "list", data: [{ id: "glm-5.3" }] };
+    return { ok: true, status: 200, json: async () => body } as unknown as Response;
+  }) as unknown as typeof fetch;
+
+  const sm = new SessionManager(
+    { state, queue, resolved: { model: { provider: "mock", id: "mock-1" }, stream: createMockStream({ delayMs: 0 }) } },
+    { emit: () => {}, fetchModels: fakeFetch },
+  );
+
+  // openai 兼容：Bearer + {base}/models（尾斜杠剥掉）
+  const r1 = await sm.listCustomModels({ baseURL: "https://api.deepseek.com/v1/", apiKey: "sk-ds" });
+  assert.equal(r1.error, undefined);
+  assert.equal(r1.models[0]?.id, "glm-5.3");
+  assert.equal(r1.url, "https://api.deepseek.com/v1/models");
+  assert.equal(requested[0]?.headers["authorization"], "Bearer sk-ds");
+
+  // anthropic：x-api-key + anthropic-version + {base}/v1/models
+  const r2 = await sm.listCustomModels({
+    baseURL: "https://api.anthropic.com",
+    apiKey: "sk-ant",
+    protocol: "anthropic",
+  });
+  assert.equal(r2.error, undefined);
+  assert.equal(r2.url, "https://api.anthropic.com/v1/models");
+  assert.equal(requested[1]?.headers["x-api-key"], "sk-ant");
+  assert.equal(requested[1]?.headers["anthropic-version"], "2023-06-01");
+
+  // gemini：x-goog-api-key + {base}/models；models[] 格式解析后 name 剥掉 models/ 前缀
+  const r3 = await sm.listCustomModels({
+    baseURL: "https://generativelanguage.googleapis.com/v1beta",
+    apiKey: "g-key",
+    protocol: "gemini",
+  });
+  assert.equal(r3.error, undefined);
+  assert.equal(r3.url, "https://generativelanguage.googleapis.com/v1beta/models");
+  assert.equal(r3.models[0]?.id, "gemini-2.5-flash");
+  assert.equal(requested[2]?.headers["x-goog-api-key"], "g-key");
+
+  // 无 key（本地端点）：请求照发，但不带鉴权字段
+  const r4 = await sm.listCustomModels({ baseURL: "http://127.0.0.1:11434/v1" });
+  assert.equal(r4.error, undefined);
+  assert.equal(requested[3]?.headers["authorization"], undefined);
+
+  // 非 http 前缀：直接报错，不打网络
+  const r5 = await sm.listCustomModels({ baseURL: "api.example.com/v1", apiKey: "sk-x" });
+  assert.ok(r5.error !== undefined && r5.error.includes("http"), `应提示 http 前缀，实际 ${String(r5.error)}`);
+  assert.equal(r5.models.length, 0);
+  assert.equal(requested.length, 4, "非法 baseURL 不应发出请求");
 });
 
 // ───────────── macOS 听写：helper stdout 协议解析 ─────────────
@@ -3038,6 +3529,197 @@ test("sessions: Agent persistSessions 在 agent_end 后自动落盘", async () =
   const list = await listSessions(dir);
   assert.equal(list.length, 1);
   assert.ok(list[0] !== undefined && state.sessionId === list[0].id);
+});
+
+// ---------------------------------------------------------------- config
+
+test("config: saveModelSpec / readSavedModelSpec 往返，覆盖写", async () => {
+  const dir = await tempDir();
+  assert.equal(await readSavedModelSpec(dir), null, "无配置文件 → null");
+
+  await saveModelSpec(dir, "openai:gpt-4o-mini");
+  assert.equal(await readSavedModelSpec(dir), "openai:gpt-4o-mini");
+
+  await saveModelSpec(dir, "opencode:glm-5.3:strong");
+  assert.equal(await readSavedModelSpec(dir), "opencode:glm-5.3:strong", "第二次保存覆盖第一次");
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("config: 损坏 / 版本不识别 / model 字段缺失的 config.json 返回 null", async () => {
+  const dir = await tempDir();
+  const configFile = path.join(dir, ".c-agent", "config.json");
+  await fs.mkdir(path.dirname(configFile), { recursive: true });
+
+  await fs.writeFile(configFile, "{not json", "utf8");
+  assert.equal(await readSavedModelSpec(dir), null, "坏 JSON → null");
+
+  await fs.writeFile(configFile, JSON.stringify({ version: 99, model: "mock:mock-1" }), "utf8");
+  assert.equal(await readSavedModelSpec(dir), null, "版本不识别 → null");
+
+  await fs.writeFile(configFile, JSON.stringify({ version: 1 }), "utf8");
+  assert.equal(await readSavedModelSpec(dir), null, "model 字段缺失 → null");
+
+  await fs.writeFile(configFile, JSON.stringify({ version: 1, model: "   " }), "utf8");
+  assert.equal(await readSavedModelSpec(dir), null, "空白 model → null");
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("config: saveCustomModel / readSavedCustomModel 往返；spec 与 customModel 互斥（最后一次的选择是唯一真相）", async () => {
+  const dir = await tempDir();
+  assert.equal(await readSavedCustomModel(dir), null, "无配置文件 → null");
+
+  await saveCustomModel(dir, {
+    provider: "anthropic",
+    id: "glm-5.3",
+    baseUrl: "https://relay.example.com",
+    apiKey: "sk-test",
+    contextWindow: 200000,
+  });
+  const back = await readSavedCustomModel(dir);
+  assert.notEqual(back, null, "customModel 往返");
+  assert.equal(back!.provider, "anthropic");
+  assert.equal(back!.id, "glm-5.3");
+  assert.equal(back!.baseUrl, "https://relay.example.com");
+  assert.equal(back!.apiKey, "sk-test");
+  assert.equal(back!.contextWindow, 200000);
+
+  // 互斥：写 spec 清 customModel
+  await saveModelSpec(dir, "opencode:glm-5.3");
+  assert.equal(await readSavedCustomModel(dir), null, "写 spec 后 customModel 被清");
+  assert.equal(await readSavedModelSpec(dir), "opencode:glm-5.3");
+
+  // 互斥：写 customModel 清 spec
+  await saveCustomModel(dir, {
+    provider: "openai",
+    id: "deepseek-chat",
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "EMPTY",
+  });
+  assert.equal(await readSavedModelSpec(dir), null, "写 customModel 后 spec 被清");
+  const noCtx = await readSavedCustomModel(dir);
+  assert.equal(noCtx!.contextWindow, undefined, "contextWindow 缺省不产出字段");
+  assert.equal(noCtx!.apiKey, "EMPTY", "EMPTY 占位原样存取（本地端点约定）");
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("config: 字段不完整的 customModel 视为损坏返回 null", async () => {
+  const dir = await tempDir();
+  const configFile = path.join(dir, ".c-agent", "config.json");
+  await fs.mkdir(path.dirname(configFile), { recursive: true });
+
+  await fs.writeFile(
+    configFile,
+    JSON.stringify({ version: 1, customModel: { provider: "", id: "x", baseUrl: "https://a", apiKey: "" } }),
+    "utf8",
+  );
+  assert.equal(await readSavedCustomModel(dir), null, "provider 为空 → null");
+
+  await fs.writeFile(
+    configFile,
+    JSON.stringify({ version: 1, customModel: { provider: "openai", id: "x", baseUrl: "", apiKey: "k" } }),
+    "utf8",
+  );
+  assert.equal(await readSavedCustomModel(dir), null, "baseUrl 为空 → null");
+
+  await fs.writeFile(
+    configFile,
+    JSON.stringify({ version: 1, customModel: { provider: "openai", id: "x", baseUrl: "https://a" } }),
+    "utf8",
+  );
+  assert.equal(await readSavedCustomModel(dir), null, "apiKey 缺失 → null");
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("config: modelSpecString 生成可回放的 spec（含 maturity），parseModelSpec 能无损吃回来", () => {
+  assert.equal(modelSpecString({ provider: "opencode-go", id: "glm-5.1" }), "opencode-go:glm-5.1");
+  assert.equal(
+    modelSpecString({ provider: "zhipu", id: "glm-4.7", maturity: "strong" }),
+    "zhipu:glm-4.7:strong",
+  );
+  const back = parseModelSpec(modelSpecString({ provider: "opencode", id: "glm-5.3", maturity: "budget" }));
+  assert.equal(back.provider, "opencode");
+  assert.equal(back.id, "glm-5.3");
+  assert.equal(back.maturity, "budget");
+});
+
+// ------------------------------------------------------- computer use 通道
+
+test("toolResult 图片块：convertToLlm 保留 screenshot 的图，openai 适配器转 image_url", () => {
+  const dataUrl = "data:image/jpeg;base64,QUJD";
+  const llm = convertToLlm([
+    { role: "user", content: "看屏幕", timestamp: 0 },
+    {
+      role: "toolResult",
+      toolCallId: "t1",
+      toolName: "screenshot",
+      content: [
+        { type: "text", text: "屏幕截图 1920x1080" },
+        { type: "image", dataUrl },
+      ],
+      isError: false,
+      timestamp: 0,
+    },
+  ]);
+  const block = llm.flatMap((m) => m.content).find((c) => c.type === "toolResult");
+  assert.ok(block && block.type === "toolResult");
+  assert.equal(block.content.some((c) => c.type === "image" && c.dataUrl === dataUrl), true,
+    "图片块应随 toolResult 一起进模型上下文");
+
+  const openai = toOpenAiMessages("sys", llm);
+  const toolMsg = openai.find((m) => (m as { role?: string }).role === "tool") as
+    | { content: Array<{ type: string; image_url?: { url: string } }> }
+    | undefined;
+  assert.ok(toolMsg);
+  assert.equal(
+    toolMsg.content.some((p) => p.type === "image_url" && p.image_url?.url === dataUrl),
+    true,
+    "role=tool 消息应携带 image_url part",
+  );
+});
+
+test("transformContext：旧轮次的截图块替换成占位文本，当前轮保留", () => {
+  // 直接构造历史消息走 transformContext 的兼容路径（state.messages 赋值）
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  state.messages = [
+    { role: "user", content: "看屏幕", timestamp: 1 },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "a1", name: "screenshot", arguments: {} }],
+      model: "mock",
+      stopReason: "toolUse",
+      usage: emptyUsage(),
+      timestamp: 2,
+    },
+    {
+      role: "toolResult",
+      toolCallId: "a1",
+      toolName: "screenshot",
+      content: [
+        { type: "text", text: "屏幕截图" },
+        { type: "image", dataUrl: "data:image/jpeg;base64,XXX" },
+      ],
+      isError: false,
+      timestamp: 3,
+    },
+    { role: "user", content: "新的请求", timestamp: 4 },
+  ];
+  const { messages: out } = transformContext(state, {
+    maxContextTokens: 1_000_000,
+    maxToolResultChars: 2000,
+    keepRecentTurns: 0,
+  });
+  const tr = out.find((m) => m.role === "toolResult");
+  assert.ok(tr && tr.role === "toolResult");
+  assert.equal(tr.content.some((c) => c.type === "image"), false, "旧轮截图应被抹掉");
+  assert.match(resultText(tr.content), /截图已省略/);
 });
 
 async function main(): Promise<void> {

@@ -539,9 +539,11 @@ export class Agent {
           timestamp: Date.now(),
         };
         retryable = !aborted;
+        // reason 必须如实区分 error / aborted：桌面端显示层靠 reason 过滤
+        // 「用户主动中断不算错误」，这里硬编码 error 会让中断也弹错误提示。
         await this.emit({
           type: "stream",
-          event: { type: "error", reason: "error", error: final },
+          event: { type: "error", reason: aborted ? "aborted" : "error", error: final },
         });
       }
 
@@ -567,15 +569,26 @@ export class Agent {
         usage: emptyUsage(),
         timestamp: Date.now(),
       };
+      // 流式通道一个事件都没出就结束（空流）：补发 error 事件，让所有显示端
+      // 走同一条错误通道看到它——否则这个失败只藏在 turn_end 的 errorMessage
+      // 里，桌面端会静默漏掉（SessionManager/显示 connector 不读 turn_end 的消息体）。
+      await this.emit({
+        type: "stream",
+        event: { type: "error", reason: "error", error: final },
+      });
     }
     return final;
   }
 
-  /** 退避等待：unref 不阻止进程退出；醒来后再由调用方检查 abort */
+  /**
+   * 退避等待。**必须保持 ref**：print 这类短命进程里，流失败后唯一的挂起任务
+   * 就是这个定时器——unref 会让 event loop 提前清空，进程带着 exit 0 静默退出，
+   * 错误与重试都到不了用户。REPL / 桌面端有别的句柄保活，ref 的代价只是
+   * 退出前多等 ≤200ms；醒来后由调用方检查 abort。
+   */
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => {
-      const timer = setTimeout(resolve, ms);
-      timer.unref();
+      setTimeout(resolve, ms);
     });
   }
 
@@ -692,7 +705,11 @@ export class Agent {
 
   /** 单次工具结果超长时按头/尾截断，避免单条撑爆上下文 */
   private maybeTruncateResult(toolName: string, content: ToolResult["content"]): ToolResult["content"] {
-    const text = content.map((c) => c.text).join("");
+    // 图片块不计入字符预算；超长截断时整条替换（含图片），由占位文本说明
+    const text = content
+      .filter((c): c is Extract<(typeof content)[number], { type: "text" }> => c.type === "text")
+      .map((c) => c.text)
+      .join("");
     if (text.length <= this.maxToolResultChars) return content;
     return [{ type: "text", text: `[${toolName} 输出已截断，原长度 ${text.length} 字符]\n\n${truncateText(text, this.maxToolResultChars)}` }];
   }

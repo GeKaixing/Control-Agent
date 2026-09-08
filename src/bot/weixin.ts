@@ -12,7 +12,8 @@
  *   - getupdates 长轮询：sync_buf 游标落盘、longpolling_timeout_ms 自适应、
  *     errcode -14 会话过期歇 10 分钟、-2 限流退避、连续失败 backoff
  *   - context_token 磁盘缓存（account+peer 粒度，重启可续）
- *   - 双重去重：message_id + 内容指纹（上游会用新 id 重发同文）
+ *   - 双重去重：message_id（TTL 5min，挡游标回退重投递）+ 内容指纹（TTL 15s，
+ *     只挡上游秒级重发同文，不吞用户窗口外的重复提问）
  *   - sendmessage：session 过期时去掉 context_token 降级重试一次
  *   - 引用消息展开（ref_msg）进正文
  * v1 未移植：媒体收发（AES-ECB CDN 上传下载）、typing 指示器、文本 batch 合并。
@@ -59,6 +60,16 @@ const ITEM_IMAGE = 2;
 const ITEM_VOICE = 3;
 const ITEM_FILE = 4;
 const ITEM_VIDEO = 5;
+
+/** message_id 去重 TTL：同一 id 的重投递（游标回退）可能隔几分钟才到，保持放宽 */
+export const MESSAGE_ID_DEDUP_TTL_MS = 300_000;
+/**
+ * 内容指纹去重 TTL：只为挡「上游用新 message_id 秒级重发同文」——长轮询批次内
+ * 重发是毫秒级、跨批是秒级，15s 足够。**别调大**：调到分钟级会把用户在窗口内
+ * 重复发的同文静默吞掉（真实案例：连发两次「模拟模型失败」测错误链路，第二条
+ * 石沉大海、无任何回复）。
+ */
+export const CONTENT_DEDUP_TTL_MS = 15_000;
 
 // ============ 协议层纯函数（测试覆盖这些） ============
 
@@ -153,6 +164,27 @@ export function buildTextMessage(
   };
   if (contextToken !== undefined && contextToken !== "") message.context_token = contextToken;
   return message;
+}
+
+/**
+ * 纯 TTL 去重：key 在 ttl 窗口内出现过 → true（不更新时间戳）；否则记下当前
+ * 时间并返回 false。超过 1000 条时顺手清理过期项，防止无限增长。
+ */
+export function isDuplicateWithin(
+  store: Map<string, number>,
+  key: string,
+  ttlMs: number,
+  now: number,
+): boolean {
+  const seenAt = store.get(key);
+  if (seenAt !== undefined && now - seenAt < ttlMs) return true;
+  store.set(key, now);
+  if (store.size > 1_000) {
+    for (const [k, ts] of store) {
+      if (now - ts >= ttlMs) store.delete(k);
+    }
+  }
+  return false;
 }
 
 // ============ ContextTokenStore（对齐 ContextTokenStore：account+peer 磁盘缓存） ============
@@ -534,12 +566,13 @@ export class WeixinAdapter implements BotAdapter {
     const senderId = String(message.from_user_id ?? "").trim();
     const messageId = String(message.message_id ?? "").trim();
     if (senderId === "" || senderId === accountId) return;
-    if (messageId !== "" && this.isDuplicate(this.seenMessageIds, messageId)) return;
+    if (messageId !== "" && this.isDuplicate(this.seenMessageIds, messageId, MESSAGE_ID_DEDUP_TTL_MS)) return;
 
     const itemList = Array.isArray(message.item_list) ? (message.item_list as Array<Record<string, unknown>>) : [];
     const text = extractText(itemList).trim();
-    // 内容指纹去重：上游会用新 message_id 重发同文（对齐 content-dedup）
-    if (text !== "" && this.isDuplicate(this.seenContent, `content:${senderId}:${createHash("md5").update(text).digest("hex")}`)) {
+    // 内容指纹去重：上游会用新 message_id 重发同文（秒级窗口，见 CONTENT_DEDUP_TTL_MS）
+    if (text !== "" && this.isDuplicate(this.seenContent, `content:${senderId}:${createHash("md5").update(text).digest("hex")}`, CONTENT_DEDUP_TTL_MS)) {
+      this.log(`[weixin] ${senderId} 与 ${CONTENT_DEDUP_TTL_MS / 1000}s 内的上一条消息同文，按上游重发忽略`);
       return;
     }
 
@@ -563,19 +596,9 @@ export class WeixinAdapter implements BotAdapter {
     });
   }
 
-  /** 带 TTL 的去重（对齐 MessageDeduplicator，TTL 300s） */
-  private isDuplicate(store: Map<string, number>, key: string): boolean {
-    const now = Date.now();
-    const seenAt = store.get(key);
-    if (seenAt !== undefined && now - seenAt < 300_000) return true;
-    store.set(key, now);
-    // 顺手清理过期项，防止无限增长
-    if (store.size > 1_000) {
-      for (const [k, ts] of store) {
-        if (now - ts >= 300_000) store.delete(k);
-      }
-    }
-    return false;
+  /** 带 TTL 的去重（对齐 MessageDeduplicator）；TTL 按 store 用途区分（见两个 *_DEDUP_TTL_MS 常量） */
+  private isDuplicate(store: Map<string, number>, key: string, ttlMs: number): boolean {
+    return isDuplicateWithin(store, key, ttlMs, Date.now());
   }
 }
 
@@ -691,7 +714,22 @@ async function main(): Promise<void> {
   await runner.start();
 }
 
-main().catch((err) => {
-  console.error(err instanceof Error ? err.stack : err);
-  process.exit(1);
-});
+/**
+ * 只在「被直接执行」时起 bot（`tsx src/bot/weixin.ts` / `npm run bot:weixin`）。
+ *
+ * 不能像 src/index.ts 那样在模块作用域裸调 main()：本文件导出 WeixinAdapter
+ * 供测试与复用，import 即执行会真的去扫码登录（打二维码 + 长轮询等确认），
+ * 把 `npm test` 卡成等待人工扫码，最后以登录超时失败收场。
+ *
+ * 判定用 process.argv[1] 而不是 `import.meta.url === ...`：本文件同时被
+ * 根 tsconfig（NodeNext，ESM）和 desktop/tsconfig.main.json（CommonJS）编译，
+ * 后者的 include 覆盖到 ../src，写 import.meta 会直接编译失败。
+ */
+const isDirectRun = /[\\/]weixin\.(ts|js|mjs|cjs)$/.test(process.argv[1] ?? "");
+
+if (isDirectRun) {
+  main().catch((err) => {
+    console.error(err instanceof Error ? err.stack : err);
+    process.exit(1);
+  });
+}

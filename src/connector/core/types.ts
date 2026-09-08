@@ -72,7 +72,7 @@ export interface Connector {
    * - 超时与取消靠 ctx.signal，connector 内部应透传到子进程
    */
   execute(toolName: string, args: Record<string, unknown>, ctx: ConnectorContext): Promise<{
-    content: import("../../types.js").TextContent[];
+    content: Array<import("../../types.js").TextContent | import("../../types.js").ImageContent>;
     isError: boolean;
   }>;
 }

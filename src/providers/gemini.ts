@@ -16,6 +16,17 @@ import type { LlmMessage, LlmTool, StreamFn } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 
+/**
+ * 401/403 且没有有效 key 时附中文指引。apiKey="EMPTY" 是桌面端「自定义模型」
+ * 弹层留空 key 的占位约定（本地端点场景），远程端点收到必然拒——把「为什么 401」
+ * 直接告诉用户，而不是让他对着一屏端点英文 JSON 猜。
+ */
+function missingKeyHint(model: ModelRef): string {
+  const key = model.apiKey ?? "";
+  if (key.length > 0 && key !== "EMPTY") return "";
+  return "\n\n↳ 当前模型没有配置 API KEY：打开「自定义模型」补填后重试（仅本地端点可留空）";
+}
+
 interface GeminiPart {
   text?: string;
   thought?: boolean;
@@ -69,6 +80,7 @@ function toGeminiContents(messages: LlmMessage[]): unknown[] {
     for (const c of m.content) {
       if (c.type !== "toolResult") continue;
       const text = c.content
+        .filter((x) => x.type === "text")
         .map((x) => x.text)
         .join("\n");
       parts.push({
@@ -184,9 +196,10 @@ export const geminiStream: StreamFn = async function* (options) {
 
   if (!response.ok || response.body === null) {
     const detail = await response.text().catch(() => "");
+    const hint = response.status === 401 || response.status === 403 ? missingKeyHint(model) : "";
     const message = acc.finish(
       "error",
-      `Gemini ${response.status}: ${detail.slice(0, 500)}`,
+      `Gemini ${response.status}: ${detail.slice(0, 500)}${hint}`,
     );
     yield { type: "error", reason: "error", error: message };
     return;

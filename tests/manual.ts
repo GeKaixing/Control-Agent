@@ -21,14 +21,20 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { EventEmitter } from "node:events";
+import { pathToFileURL } from "node:url";
 
 import { sleep, stripAnsi } from "./registry.js";
 
 // 用 require.resolve 拿到绝对路径，因为子进程的 cwd 可能在 /tmp 子目录里，
 // 从那里 `--import tsx` 找不到 node_modules/tsx。
 // require 从当前进程跑的测试出发解析，正好走到仓库的 node_modules。
+//
+// 必须转成 file:// URL：`--import` 走 ESM 解析，Windows 上的裸绝对路径
+// （C:\...\tsx\dist\loader.mjs）会被当成协议为 "c:" 的 URL 而抛
+// ERR_UNSUPPORTED_ESM_URL_SCHEME。POSIX 上 /a/b.mjs 恰好能被解析，所以这个坑
+// 只在 Windows 暴露。
 const requireFromHere = createRequire(import.meta.url);
-const TSX_LOADER = requireFromHere.resolve("tsx");
+const TSX_LOADER = pathToFileURL(requireFromHere.resolve("tsx")).href;
 
 // -------------------------------------------------------------- 配置项
 

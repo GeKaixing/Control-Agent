@@ -75,6 +75,33 @@ export const VENDOR_PRESETS: VendorPreset[] = [
     defaultModel: "openai/gpt-4o-mini",
   },
   {
+    // OpenCode Zen 网关（opencode.ai/zen）：base 含版本段，openai.ts 拼 /chat/completions。
+    // 注意 Zen 的 GPT/Grok 系走 /responses、Claude 系走 /messages、Gemini 系走
+    // /models/<id>——只有 chat-completions 家族（GLM / Kimi / DeepSeek / MiniMax
+    // 等）能用本预设；API key 在 opencode.ai/auth 控制台获取。
+    id: "opencode",
+    label: "OpenCode Zen",
+    baseUrl: "https://opencode.ai/zen/v1",
+    baseUrlEnv: "OPENCODE_BASE_URL",
+    apiKeyEnv: "OPENCODE_API_KEY",
+    defaultModel: "glm-5.3",
+    aliases: ["zen"],
+  },
+  {
+    // OpenCode Go：Zen 的低价订阅通道（$10/月；用量额度 $12/5小时、$30/周、$60/月）。
+    // key 与 Zen 是同一把（opencode.ai/auth 获取），但 env 名独立成 OPENCODE_GO_API_KEY，
+    // 避免两个预设互相覆盖。base 带 /zen 段（官方文档口径），同 Zen 的家族端点限制：
+    // OpenAI 兼容预设只吃 chat-completions 家族（GLM / Kimi / DeepSeek / MiMo 等），
+    // MiniMax / Qwen 系走 /messages，不适用本预设。
+    id: "opencode-go",
+    label: "OpenCode Go（订阅）",
+    baseUrl: "https://opencode.ai/zen/go/v1",
+    baseUrlEnv: "OPENCODE_GO_BASE_URL",
+    apiKeyEnv: "OPENCODE_GO_API_KEY",
+    defaultModel: "glm-5.1",
+    aliases: ["go"],
+  },
+  {
     id: "ollama",
     label: "Ollama（本地）",
     baseUrl: "http://localhost:11434/v1",
@@ -122,8 +149,19 @@ const CONTEXT_WINDOW_HINTS: Array<[RegExp, number]> = [
 ];
 
 export function lookupContextWindow(modelId: string): number {
+  return lookupKnownContextWindow(modelId) ?? 1_000_000;
+}
+
+/**
+ * 严格版粗表查询：只有正则条目真命中才返回，未知模型返回 undefined。
+ *
+ * 与 lookupContextWindow（1M 兜底）的分工：兜底版喂「分母/预算必须永远有值」
+ * 的场景（CLI 预算、裁剪）；严格版喂「展示给用户看」的场景（桌面端 /models
+ * 列表的窗口参考值）——没把握的模型宁可留空也不显示一个可能差一个数量级的数。
+ */
+export function lookupKnownContextWindow(modelId: string): number | undefined {
   for (const [re, n] of CONTEXT_WINDOW_HINTS) if (re.test(modelId)) return n;
-  return 1_000_000;
+  return undefined;
 }
 
 // ────────────── 「自定义模型」弹层的接口地址预设（纯 UI 数据） ──────────────
@@ -172,6 +210,8 @@ export const BASE_URL_PRESETS: BaseUrlPreset[] = [
   { label: "MiniMax", baseURL: "https://api.minimaxi.com/v1", defaultModel: "MiniMax-M2" },
   { label: "OpenAI", baseURL: "https://api.openai.com/v1", defaultModel: "gpt-4o-mini" },
   fromVendor("openrouter"),
+  fromVendor("opencode"),
+  fromVendor("opencode-go"),
   { label: "Groq", baseURL: "https://api.groq.com/openai/v1", defaultModel: "llama-3.3-70b-versatile" },
   { label: "xAI Grok", baseURL: "https://api.x.ai/v1", defaultModel: "grok-4" },
   fromVendor("ollama"),

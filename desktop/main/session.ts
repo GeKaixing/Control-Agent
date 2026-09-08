@@ -21,7 +21,9 @@ import {
   MessageQueue,
   estimateTokens,
   maxContextTokensFor,
+  modelSpecString,
   totalUsage,
+  type StoredCustomModel,
 } from "../../src/context/index.js";
 import type { DisplayEvent } from "../../src/connector/core/types.js";
 import {
@@ -32,7 +34,11 @@ import {
   type AssembledSession,
   type SessionMode,
 } from "../../src/session.js";
-import { lookupContextWindow, type ResolvedModel } from "../../src/providers/index.js";
+import {
+  lookupContextWindow,
+  lookupKnownContextWindow,
+  type ResolvedModel,
+} from "../../src/providers/index.js";
 import { resolveModel } from "../../src/providers/index.js";
 import { BASE_URL_PRESETS } from "../../src/providers/vendors.js";
 import { allTools } from "../../src/tools/index.js";
@@ -85,6 +91,18 @@ export interface SessionDeps {
    * "always"（本会话全部允许）/ "deny"（拒绝）。注入缺失时按 deny 处理（fail-safe）。
    */
   approvalPrompt?: (req: { toolName: string; args: string }) => Promise<"allow" | "always" | "deny">;
+  /**
+   * 模型变更后的持久化钩子：主进程注入（写 .c-agent/config.json，与 CLI 共用同一份）。
+   * 缺省 noop——单测不落盘。spec 版触发点：setModel / setEndpoint 成功后。
+   */
+  persistModel?: (spec: string) => void;
+  /**
+   * 自定义模型持久化钩子（同写 .c-agent/config.json，与 spec 互斥——最后一次的
+   * 选择是唯一真相）。触发点：setCustomModel 成功后。完整参数（provider/id/
+   * baseUrl/apiKey/contextWindow）自描述，重启后可直接重建 ModelRef——
+   * 早期版本「自定义模型不落盘」是错的：那正是用户重启后配置全丢的原因。
+   */
+  persistCustomModel?: (custom: StoredCustomModel) => void;
 }
 
 // ────────────── 动态模型列表（可配置） ──────────────
@@ -150,9 +168,33 @@ function modelsAuthHeaders(endpoint: EndpointId): Record<string, string> {
 }
 
 /**
+ * 按协议构造 /models 请求的鉴权 headers（纯函数，key 由调用方给定）：
+ *  - openai 兼容（含 responses）→ `authorization: Bearer <key>`
+ *  - anthropic   → `x-api-key` + `anthropic-version`
+ *  - gemini      → `x-goog-api-key`
+ * key 为空（或占位 "EMPTY"）时不带鉴权字段——本地端点（ollama 等）无 key 也能拉。
+ */
+function authHeadersForProtocol(protocol: string, key: string): Record<string, string> {
+  const hasKey = key.length > 0 && key !== "EMPTY";
+  if (protocol === "anthropic") {
+    const out: Record<string, string> = { "anthropic-version": "2023-06-01" };
+    if (hasKey) out["x-api-key"] = key;
+    return out;
+  }
+  if (protocol === "gemini") {
+    return hasKey ? { "x-goog-api-key": key } : {};
+  }
+  return hasKey ? { authorization: `Bearer ${key}` } : {};
+}
+
+/**
  * 解析 /models 响应，按端点分两种格式：
  *  - openai（含各 OpenAI 兼容厂商）：`{ object: "list", data: [{ id, owned_by?, ... }] }`
  *  - gemini：`{ models: [{ name: "models/gemini-…", displayName?, inputTokenLimit? }] }`，name 剥掉 "models/" 前缀
+ * contextWindow 三级来源：响应元数据（context_window / context_length /
+ * inputTokenLimit）→ 内核粗表严格命中（lookupKnownContextWindow，识别的模型家族
+ * 如 deepseek/kimi/claude）→ 都没有就留空（UI 不显示）——未知模型不猜，展示值
+ * 宁缺毋滥；分母/预算场景另有 1M 兜底版 lookupContextWindow，不在这条链路上。
  * 宽容处理：数组不是数组 / 条目缺标识 → 报错（error 回传前端）；元数据尽力读取，没有就不填。
  */
 export function parseModelsResponse(raw: unknown, endpoint: EndpointId = "openai"): ModelInfo[] {
@@ -177,6 +219,9 @@ export function parseModelsResponse(raw: unknown, endpoint: EndpointId = "openai
       const ctx = rec["inputTokenLimit"];
       if (typeof ctx === "number" && Number.isFinite(ctx) && ctx > 0) {
         info.contextWindow = Math.round(ctx);
+      } else {
+        const known = lookupKnownContextWindow(id);
+        if (known !== undefined) info.contextWindow = known;
       }
       out.push(info);
     }
@@ -199,6 +244,9 @@ export function parseModelsResponse(raw: unknown, endpoint: EndpointId = "openai
     const ctx = rec["context_window"] ?? rec["context_length"] ?? rec["contextWindow"];
     if (typeof ctx === "number" && Number.isFinite(ctx) && ctx > 0) {
       info.contextWindow = Math.round(ctx);
+    } else {
+      const known = lookupKnownContextWindow(id);
+      if (known !== undefined) info.contextWindow = known;
     }
     out.push(info);
   }
@@ -468,6 +516,11 @@ export class SessionManager {
       ...(deps.fetchModels !== undefined ? { fetchModels: deps.fetchModels } : {}),
       // approvalPrompt 可选注入（审批弹窗）；不传且 approvalMode 开启时按 deny 处理
       ...(deps.approvalPrompt !== undefined ? { approvalPrompt: deps.approvalPrompt } : {}),
+      // persistModel 可选注入（模型选择落盘）；不传 noop，单测不写盘
+      ...(deps.persistModel !== undefined ? { persistModel: deps.persistModel } : {}),
+      ...(deps.persistCustomModel !== undefined
+        ? { persistCustomModel: deps.persistCustomModel }
+        : {}),
     };
   }
 
@@ -595,12 +648,18 @@ export class SessionManager {
     };
   }
 
+  /** 模型选择落盘（deps.persistModel 注入，缺省 noop）。spec 从 resolved.model 现算，最真实。 */
+  private persistModelChoice(): void {
+    this.deps.persistModel?.(modelSpecString(this.resolved.model));
+  }
+
   /** 切换模型。下一次新建的 Agent 才生效；当前不打断。spec 格式 "provider:modelId"。 */
   setModel(spec: string): SetModelResult {
     this.modelSpecCache = spec;
     const { resolved } = resolveModelSpec(spec);
     this.resolved = applyReasoningToResolved(resolved, this.reasoning, this.endpoint);
     this.endpoint = inferEndpointFromProvider(this.resolved.model.provider);
+    this.persistModelChoice();
     const out: SetModelResult = {
       model: modelLabel(this.resolved.model),
       maxTokens: this.resolved.model.maxTokens ?? 0,
@@ -621,7 +680,7 @@ export class SessionManager {
    */
   setCustomModel(params: CustomModelParams): SetModelResult {
     const protocol = params.protocol ?? "openai";
-    if (protocol !== "openai" && protocol !== "anthropic" && protocol !== "gemini") {
+    if (protocol !== "openai" && protocol !== "responses" && protocol !== "anthropic" && protocol !== "gemini") {
       throw new Error(`不支持的协议：${String(protocol)}`);
     }
     let baseURL = params.baseURL.trim().replace(/\/+$/, "");
@@ -637,7 +696,7 @@ export class SessionManager {
       baseURL = baseURL.slice(0, -3);
     }
     const ref: ModelRef = {
-      provider: protocol,
+      provider: protocol === "responses" ? "openai-responses" : protocol,
       id: modelId,
       baseUrl: baseURL,
       apiKey: apiKey.length > 0 ? apiKey : "EMPTY",
@@ -646,6 +705,17 @@ export class SessionManager {
     this.modelSpecCache = modelSpecOf(ref);
     this.resolved = applyReasoningToResolved(resolveModel(ref), this.reasoning, this.endpoint);
     this.endpoint = inferEndpointFromProvider(this.resolved.model.provider);
+    // 自定义模型持久化：从归一后的 ref 提取完整参数（baseUrl 已剥尾斜杠、
+    // anthropic 已剥 /v1、apiKey 空已占位 EMPTY）——存真值，恢复时零转换歧义。
+    // 用 ref 而非 resolved.model：后者经 resolveModel 填充了粗表兜底 contextWindow，
+    // 会把「用户没填」也存成显式值；只落用户显式覆写，恢复时自动识别不受影响。
+    this.deps.persistCustomModel?.({
+      provider: ref.provider,
+      id: ref.id,
+      baseUrl: ref.baseUrl ?? "",
+      apiKey: ref.apiKey ?? "EMPTY",
+      ...(ref.contextWindow !== undefined ? { contextWindow: ref.contextWindow } : {}),
+    });
     const out: SetModelResult = {
       model: modelLabel(this.resolved.model),
       maxTokens: this.resolved.model.maxTokens ?? 0,
@@ -755,6 +825,7 @@ export class SessionManager {
     this.modelSpecCache = `${endpoint}:${this.resolved.model.id}`;
     const { resolved } = resolveModelSpec(this.modelSpecCache);
     this.resolved = applyReasoningToResolved(resolved, this.reasoning, endpoint);
+    this.persistModelChoice();
     const out: SetModelResult = {
       model: modelLabel(this.resolved.model),
       maxTokens: this.resolved.model.maxTokens ?? 0,
@@ -981,6 +1052,32 @@ export class SessionManager {
   }
 
   /**
+   * 「自定义模型」弹层的模型列表拉取：按用户当场填的 baseURL + apiKey +
+   * protocol 直连端点 /models。与 listModels（模型菜单）的差异：
+   *  - 不读 env、不落缓存——key 不同返回结果可能不同，防抖交给前端
+   *    （按参数指纹去重），失败也不会污染模型菜单的缓存；
+   *  - URL 由用户输入的 baseURL 推导（modelsUrlForBaseUrl），与
+   *    warmModelsCache 的自定义模型直连同一套推导规则。
+   * 失败一律转 result.error 返回（不 throw），前端回退手动填写。
+   */
+  async listCustomModels(params: {
+    baseURL: string;
+    apiKey?: string;
+    protocol?: "openai" | "responses" | "anthropic" | "gemini";
+  }): Promise<ListModelsResult> {
+    const baseURL = params.baseURL.trim();
+    const rawProtocol = params.protocol ?? "openai";
+    // responses 的 /models 形状与 openai 完全相同（{base}/models + Bearer），归 openai 解析
+    const protocol: EndpointId = rawProtocol === "responses" ? "openai" : rawProtocol;
+    if (!/^https?:\/\//i.test(baseURL)) {
+      return { endpoint: protocol, url: baseURL, models: [], error: "接口地址要以 http(s):// 开头" };
+    }
+    const url = modelsUrlForBaseUrl(protocol, baseURL);
+    const headers = authHeadersForProtocol(protocol, params.apiKey ?? "");
+    return this.fetchModelsAt(url, { parseAs: protocol, headers });
+  }
+
+  /**
    * 拉取并解析一个 /models URL（超时 + 错误兜底）。parseAs 决定响应格式
    * （openai 的 data[] / gemini 的 models[]）。listModels（模型菜单）与
    * warmModelsCache（自定义模型直连）共用这一份 HTTP 逻辑。
@@ -1043,17 +1140,7 @@ export class SessionManager {
   /** 自定义模型请求 /models 的鉴权 headers——key 来自模型本身，不是 env。 */
   private customModelAuthHeaders(): Record<string, string> {
     const m = this.resolved.model;
-    const key = m.apiKey ?? "";
-    const hasKey = key.length > 0 && key !== "EMPTY";
-    if (m.provider === "anthropic") {
-      const out: Record<string, string> = { "anthropic-version": "2023-06-01" };
-      if (hasKey) out["x-api-key"] = key;
-      return out;
-    }
-    if (m.provider === "gemini") {
-      return hasKey ? { "x-goog-api-key": key } : {};
-    }
-    return hasKey ? { authorization: `Bearer ${key}` } : {};
+    return authHeadersForProtocol(m.provider, m.apiKey ?? "");
   }
 
   /**
@@ -1113,13 +1200,22 @@ export class SessionManager {
    * - 没跑且队列空：什么都不做
    * - 没跑且队列有：new Agent + 后台 run
    *
-   * Agent 的 `state.tools` / `state.model.maxTokens` / `state.systemPrompt`
-   * 都来自 `this.state`（在 assembleSession 里设定）——所以下次"建新 Agent"时
-   * `mode`/`reasoning`/`endpoint` 改了，就用新的；当前 turn 不打断。
+   * Agent 的 `state.tools` / `state.systemPrompt` 来自 `this.state`（assembleSession
+   * 时设定）；`state.model` 在这里从 `this.resolved.model` 同步——setModel /
+   * setCustomModel / setEndpoint / setReasoning 只改 resolved，改了之后下一次
+   * 新建的 Agent 整体生效（新 stream + 新 ref），当前 turn 不打断。
    */
   private async maybeStart(): Promise<void> {
     if (this.currentAgent !== null) return;
     if (!this.queue.hasFollowUps()) return;
+
+    // 模型同步（401 根因修复）：Agent.callModel 发请求用的是 state.model
+    // （StreamOptions.model），而 setModel / setCustomModel / setEndpoint /
+    // setReasoning 只更新 this.resolved——不同步的话，请求永远携带 bootstrap
+    // 时的旧 ref（自定义模型的 baseUrl / key 全丢，打到默认端点必然 401）。
+    // 在这里把 resolved.model 同步进 state.model：新 stream + 新 ref 同代生效，
+    // 当前跑着的一轮不受影响（切换语义：下一次新建的 Agent 才生效，不打断）。
+    this.state.model = this.resolved.model;
 
     // plan mode 第一轮 system 注入"先 plan 后执行"提示词；切 full 时不再有。
     // 实现：在 assembleSession 时已经按 mode 拼好了 system prompt；
@@ -1307,7 +1403,8 @@ function applyReasoningToResolved(
 /** 从 provider id 推断 endpoint（兼容 "mock"/"openai"/"anthropic"） */
 function inferEndpointFromProvider(provider: string): EndpointId {
   if (provider === "mock") return "mock";
-  if (provider === "openai") return "openai";
+  // openai-responses 的 /models 形状与 openai 相同（{base}/models + Bearer），归 openai 端点
+  if (provider === "openai" || provider === "openai-responses") return "openai";
   if (provider === "anthropic") return "anthropic";
   if (provider === "gemini") return "gemini";
   return "openai";

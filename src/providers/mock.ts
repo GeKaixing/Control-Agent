@@ -9,6 +9,9 @@
  *
  * 第二层让我们能用 `--model mock --connectors ./src/connector/connectors` 把整条
  * Agent → Connector → FFmpeg 链路在没 API key 的情况下也跑通。
+ *
+ * 另有错误输出链路的测试钩子：发「模拟模型失败」触发 mock 的流错误事件，
+ * 让 CLI / print / 桌面 / bot 的错误呈现不依赖真实 API key 也能手工复现。
  */
 
 import type { ModelRef, StopReason } from "../types.js";
@@ -21,6 +24,14 @@ interface MockToolCall {
 }
 
 const DEFAULT_DELAY_MS = 8;
+
+/**
+ * 测试钩子：用户消息命中该关键字时，mock 直接 yield 一个 error 事件（形状与真实
+ * provider 的流失败一致）。用途：没有 API key 也能在 CLI / print / 桌面 / bot 四条
+ * 出口手工复现「模型流失败 → 重试 → 最终错误输出给用户」的完整链路。
+ */
+const MOCK_STREAM_ERROR_PATTERN = /模拟(?:模型|流)?失败|simulate\s+(?:a\s+)?(?:stream\s+)?error/i;
+const MOCK_STREAM_ERROR_MESSAGE = "MOCK_ERROR：模拟的模型流失败（「模拟模型失败」关键字触发，用于测试错误输出链路）";
 
 /** mock 已硬编码识别的内置工具名；connector tool 不在内，靠命名空间（`xxx.yyy`）识别 */
 const BUILTIN_TOOL_NAMES: ReadonlySet<string> = new Set([
@@ -331,6 +342,8 @@ function decide(
       "或用 `--model openai:你的模型` 指定。",
       "",
       `可用工具：${toolNames.join(", ")}`,
+      "",
+      "想验证错误输出链路，发「模拟模型失败」即可触发 mock 的流错误。",
       ...(hasConnectors
         ? [
             "",
@@ -358,6 +371,17 @@ export function createMockStream(options?: { delayMs?: number }): StreamFn {
   return async function* (opts: StreamOptions) {
     const model: ModelRef = opts.model;
     const acc = new StreamAccumulator(`${model.provider}:${model.id}`);
+
+    // 错误输出链路的测试钩子：直接对齐真实 provider 的 error 事件形状
+    if (MOCK_STREAM_ERROR_PATTERN.test(lastUserText(opts.messages).trim())) {
+      yield {
+        type: "error",
+        reason: "error" as StopReason,
+        error: acc.finish("error", MOCK_STREAM_ERROR_MESSAGE),
+      };
+      return;
+    }
+
     const plan = decide(opts);
 
     yield { type: "start", partial: acc.partial };

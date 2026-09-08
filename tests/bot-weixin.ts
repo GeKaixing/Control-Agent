@@ -9,6 +9,7 @@
  *  - buildTextMessage：msg 结构、context_token 可选
  *  - ContextTokenStore：set/get/持久化/restore/drop
  *  - WeixinAdapter.processMessage 行为：去重、白名单、群过滤、context_token 记账
+ *  - isDuplicateWithin：窗口内去重 / 窗口外放行 + TTL 秒级回归护栏
  */
 
 import assert from "node:assert/strict";
@@ -17,12 +18,15 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  CONTENT_DEDUP_TTL_MS,
+  MESSAGE_ID_DEDUP_TTL_MS,
   ContextTokenStore,
   WeixinAdapter,
   buildTextMessage,
   extractText,
   guessChatType,
   ilinkHeaders,
+  isDuplicateWithin,
   isSessionExpired,
 } from "../src/bot/weixin.js";
 import type { BotIncomingMessage } from "../src/bot/types.js";
@@ -171,7 +175,7 @@ test("weixin: processMessage 去重/白名单/群过滤/context_token", async ()
   // 同 message_id 重发 → 去重
   await handler({ ...baseMsg });
   assert.equal(received.length, 1);
-  // 新 id 同内容 → 内容指纹去重
+  // 新 id 同内容 → 内容指纹去重（秒级窗口内仍视为上游重发）
   await handler({ ...baseMsg, message_id: "m2" });
   assert.equal(received.length, 1);
 
@@ -205,4 +209,16 @@ test("weixin: processMessage 白名单按 sender 或 chat 匹配", async () => {
   assert.equal(received.length, 0);
   await handler(msgOf("userB", "w2"));
   assert.equal(received.length, 1);
+});
+
+test("weixin: 内容去重窗口必须是秒级——窗口内同文忽略，窗口外放行", () => {
+  const store = new Map<string, number>();
+  const key = "content:userA:abc";
+  assert.equal(isDuplicateWithin(store, key, CONTENT_DEDUP_TTL_MS, 1_000), false);
+  assert.equal(isDuplicateWithin(store, key, CONTENT_DEDUP_TTL_MS, 10_000), true); // 窗口内：按上游重发忽略
+  assert.equal(isDuplicateWithin(store, key, CONTENT_DEDUP_TTL_MS, 20_000), false); // 窗口外：放行，用户的重复提问能进来
+  // 回归护栏：内容去重 TTL 曾是 300s，把窗口内用户连发两次的同文静默吞掉
+  // （「模拟模型失败」只能问一次）。必须保持秒级，且不得长于 message_id 去重。
+  assert.ok(CONTENT_DEDUP_TTL_MS <= 60_000, `内容去重 TTL 过大：${CONTENT_DEDUP_TTL_MS}ms，会吞掉用户重复提问`);
+  assert.ok(MESSAGE_ID_DEDUP_TTL_MS >= CONTENT_DEDUP_TTL_MS);
 });

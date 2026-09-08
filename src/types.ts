@@ -64,7 +64,8 @@ export interface ToolResultMessage {
   role: "toolResult";
   toolCallId: string;
   toolName: string;
-  content: TextContent[];
+  /** 工具结果内容；screenshot 等工具可返回图片块（与文本块混排） */
+  content: (TextContent | ImageContent)[];
   isError: boolean;
   timestamp: number;
 }
@@ -74,11 +75,13 @@ export type AgentMessage = UserMessage | AssistantMessage | ToolResultMessage;
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high";
 
 /**
- * "openai" / "anthropic" / "mock" 是协议 provider；其余是厂商预设
- * （src/providers/vendors.ts，全部走 OpenAI 兼容协议，复用 openaiStream）。
+ * "openai" / "anthropic" / "gemini" / "openai-responses" / "mock" 是协议
+ * provider；其余是厂商预设（src/providers/vendors.ts，全部走 OpenAI 兼容
+ * 协议，复用 openaiStream）。
  */
 export type ProviderId =
   | "openai"
+  | "openai-responses"
   | "anthropic"
   | "gemini"
   | "mock"
@@ -87,6 +90,8 @@ export type ProviderId =
   | "zhipu"
   | "dashscope"
   | "openrouter"
+  | "opencode"
+  | "opencode-go"
   | "ollama";
 
 /**

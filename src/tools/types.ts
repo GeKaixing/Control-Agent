@@ -1,5 +1,5 @@
 import type { JsonSchema } from "../providers/types.js";
-import type { TextContent } from "../types.js";
+import type { ImageContent, TextContent } from "../types.js";
 
 export interface ToolContext {
   cwd: string;
@@ -7,7 +7,8 @@ export interface ToolContext {
 }
 
 export interface ToolResult {
-  content: TextContent[];
+  /** 文本块与图片块混排（screenshot 工具返回截图） */
+  content: (TextContent | ImageContent)[];
   isError: boolean;
 }
 
@@ -22,6 +23,11 @@ export interface Tool {
 
 export function ok(text: string): ToolResult {
   return { content: [{ type: "text", text }], isError: false };
+}
+
+/** 带图片的成功结果：文本说明 + 截图（Computer Use 通道） */
+export function okImage(dataUrl: string, text: string): ToolResult {
+  return { content: [{ type: "text", text }, { type: "image", dataUrl }], isError: false };
 }
 
 export function fail(text: string): ToolResult {

@@ -10,6 +10,17 @@ import type { LlmMessage, StreamFn } from "./types.js";
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
 const API_VERSION = "2023-06-01";
 
+/**
+ * 401/403 且没有有效 key 时附中文指引。apiKey="EMPTY" 是桌面端「自定义模型」
+ * 弹层留空 key 的占位约定（本地端点场景），远程端点收到必然拒——把「为什么 401」
+ * 直接告诉用户，而不是让他对着一屏端点英文 JSON 猜。
+ */
+function missingKeyHint(model: ModelRef): string {
+  const key = model.apiKey ?? "";
+  if (key.length > 0 && key !== "EMPTY") return "";
+  return "\n\n↳ 当前模型没有配置 API KEY：打开「自定义模型」补填后重试（仅本地端点可留空）";
+}
+
 function thinkingBudget(level: string, maxTokens: number): number | null {
   switch (level) {
     case "medium":
@@ -76,19 +87,36 @@ function toAnthropicMessages(messages: LlmMessage[]): unknown[] {
       continue;
     }
 
-    // toolResult：Anthropic 把工具结果放进一条 user 消息
+    // toolResult：Anthropic 把工具结果放进一条 user 消息。
+    // 图片块转成 base64 source（dataUrl: data:image/jpeg;base64,XXX）。
     const results = m.content
       .filter((c) => c.type === "toolResult")
       .map((c) => {
         const tr = c as {
           toolCallId: string;
           isError: boolean;
-          content: { text: string }[];
+          content: { type: string; text: string; dataUrl?: string }[];
         };
+        const hasImage = tr.content.some((x) => x.type === "image");
         return {
           type: "tool_result",
           tool_use_id: tr.toolCallId,
-          content: tr.content.map((x) => x.text).join("\n"),
+          content: hasImage
+            ? tr.content.map((x) => {
+                if (x.type === "image" && typeof x.dataUrl === "string") {
+                  const match = x.dataUrl.match(/^data:([^;]+);base64,(.+)$/s);
+                  return {
+                    type: "image",
+                    source: {
+                      type: "base64",
+                      media_type: match?.[1] ?? "image/png",
+                      data: match?.[2] ?? "",
+                    },
+                  };
+                }
+                return { type: "text", text: (x as { text: string }).text };
+              })
+            : tr.content.map((x) => x.text).join("\n"),
           is_error: tr.isError,
         };
       });
@@ -156,9 +184,10 @@ export const anthropicStream: StreamFn = async function* (options) {
 
   if (!response.ok || response.body === null) {
     const detail = await response.text().catch(() => "");
+    const hint = response.status === 401 || response.status === 403 ? missingKeyHint(model) : "";
     const message = acc.finish(
       "error",
-      `Anthropic ${response.status}: ${detail.slice(0, 500)}`,
+      `Anthropic ${response.status}: ${detail.slice(0, 500)}${hint}`,
     );
     yield { type: "error", reason: "error", error: message };
     return;
