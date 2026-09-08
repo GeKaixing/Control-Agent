@@ -22,6 +22,7 @@
 
 import { existsSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -76,9 +77,17 @@ export class ConnectorLoader {
       );
     }
 
-    // NodeNext 下动态 import 必须用 file:// URL，且路径要绝对
-    const importUrl = pathToFileURL(entryAbs).href;
-    const mod = (await import(importUrl)) as { default?: unknown };
+    // 双端加载：同一份 loader 源码要跑在两种模块体制下——
+    //  - CJS（Electron main 编译产物）：tsc 会把动态 import() 改写成 require()，
+    //    而 require() 不认 file:// URL（报 Cannot find module 'file:///...'），
+    //    必须走 createRequire + POSIX 绝对路径。
+    //  - ESM（tsx / NodeNext 直跑 TS）：动态 import 必须用 file:// URL 且路径绝对。
+    // typeof 探测避开 ESM 下的 ReferenceError（__filename/module 未定义）与
+    // CJS emit 下的 import.meta 编译错误。
+    const mod =
+      typeof __filename === "string" && typeof module !== "undefined"
+        ? (createRequire(__filename)(entryAbs) as { default?: unknown })
+        : ((await import(pathToFileURL(entryAbs).href)) as { default?: unknown });
     if (typeof mod.default !== "function") {
       throw new Error(
         `connector "${manifest.id}" default export is not a class/function (got ${typeof mod.default})`,
