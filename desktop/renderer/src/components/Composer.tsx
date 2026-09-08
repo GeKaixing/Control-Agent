@@ -521,7 +521,8 @@ export function Composer({
           </div>
         )}
 
-        <div className="flex flex-nowrap items-center gap-1 overflow-hidden px-2 pb-2 pt-1">
+        {/* 不加 overflow-hidden：MicButton 的提示气泡向上弹出，加了会被裁掉 */}
+        <div className="flex flex-nowrap items-center gap-1 px-2 pb-2 pt-1">
           <div className="flex min-w-0 items-center gap-1">
             {info !== null && (
               <>
