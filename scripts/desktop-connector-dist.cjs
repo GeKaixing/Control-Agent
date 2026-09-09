@@ -13,13 +13,34 @@ const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
 const srcDir = path.join(root, "connectors-mcp");
-const distCandidates = [
-  path.join(root, "desktop/main/dist/g/connectors-mcp"),
-  path.join(root, "desktop/main/dist/connectors-mcp"),
-];
+const distRoot = path.join(root, "desktop/main/dist");
 
-const distDir = distCandidates.find((p) => fs.existsSync(p));
-if (distDir === undefined) {
+/**
+ * 定位编译产物里的 connectors-mcp。
+ *
+ * rootDir 布局决定产物深嵌一层「仓库所在目录名」：`dist/<仓库目录名>/connectors-mcp`。
+ * 目录名是环境产物（项目在 g/ 下就叫 g，搬到 c/ 下就叫 c），不能写死——
+ * 以前写死 ["g", ""] 两个候选，项目搬到 c/ 后两个都落空，复制步骤静默跳过，
+ * 桌面端 connector 因此加载不到。改成扫 dist/ 子目录动态找（与 entry.mjs
+ * resolveDistMain / index.ts resolveDistConnectorsDir 同坑同修）。
+ */
+function resolveDistConnectorsDir() {
+  const direct = path.join(distRoot, "connectors-mcp");
+  if (fs.existsSync(direct)) return direct;
+  try {
+    for (const entry of fs.readdirSync(distRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const candidate = path.join(distRoot, entry.name, "connectors-mcp");
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  } catch {
+    // dist 不存在（未编译）或读不了
+  }
+  return null;
+}
+
+const distDir = resolveDistConnectorsDir();
+if (distDir === null) {
   console.log("[desktop-connector-dist] dist 里没有编译产物 connectors-mcp，跳过");
   process.exit(0);
 }

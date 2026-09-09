@@ -58,6 +58,15 @@ export class McpStdioClient {
     for (const [k, v] of Object.entries(this.extraEnv)) {
       env[k] = v;
     }
+    // Electron 主进程里 process.execPath 是 electron.exe——直接 spawn 会被当成
+    // Electron 应用启动，弹「Unable to find Electron app at <server.js>」对话框。
+    // 按 Electron 官方做法给子进程设 ELECTRON_RUN_AS_NODE=1，让它退回纯 node 行为。
+    // 必须在 STRIP_ENV 剥除之后补：CLI 场景下该变量是 IDE 沙箱注入的干扰源，
+    // 剥掉没错；桌面端 spawn node 子进程时需要显式置 1。command 不是当前可执行
+    // 文件（如 browser-use 走 uvx）时不掺和。
+    if (process.versions.electron !== undefined && this.command === process.execPath) {
+      env["ELECTRON_RUN_AS_NODE"] = "1";
+    }
 
     const child = spawn(this.command, [...this.args], {
       stdio: ["pipe", "pipe", "pipe"],

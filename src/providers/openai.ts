@@ -275,12 +275,20 @@ export const openaiStream: StreamFn = async function* (options) {
       yield { type: "text_delta", delta: delta["content"], partial: acc.partial };
     }
 
-    // o 系列与部分兼容端点使用 reasoning_content
-    if (typeof delta["reasoning_content"] === "string") {
-      acc.pushThinking(delta["reasoning_content"]);
+    // 思考字段三家名字不一：o 系列与部分兼容端点用 reasoning_content，
+    // OpenRouter / opencode zen 通道用 reasoning（实测 mimo-v2.5）。任一存在即产出
+    // thinking_delta；同 chunk 同时带时只取一个，避免思考文本重复入上下文。
+    const reasoningDelta =
+      typeof delta["reasoning_content"] === "string"
+        ? delta["reasoning_content"]
+        : typeof delta["reasoning"] === "string"
+          ? delta["reasoning"]
+          : null;
+    if (reasoningDelta !== null) {
+      acc.pushThinking(reasoningDelta);
       yield {
         type: "thinking_delta",
-        delta: delta["reasoning_content"],
+        delta: reasoningDelta,
         partial: acc.partial,
       };
     }

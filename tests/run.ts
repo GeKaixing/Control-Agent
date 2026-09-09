@@ -3757,6 +3757,27 @@ test("transformContext：旧轮次的截图块替换成占位文本，当前轮�
 async function main(): Promise<void> {
   const { main: runMain } = await import("./registry.js");
   await runMain();
+  await sweepTestTmpDirs();
+}
+
+/**
+ * 测试各处用 mkdtemp 在系统 temp 下建目录，散落的用例大多没有清理——
+ * 不清扫的话每跑一轮测试就在 temp 里漏十几个目录，日积月累上千个。
+ * 这里在全部用例跑完后按前缀统一清扫：本轮新建的 + 历史漏网的都收掉。
+ * 前缀刻意选了不易撞车的（pillars- 除外，但它在用户 temp 下只有本仓库会建）。
+ */
+const TMP_SWEEP_PREFIXES = ["agent-test-", "pillars-", "c-agent-bot-test-", "c-agent-weixin-test-"];
+
+async function sweepTestTmpDirs(): Promise<void> {
+  const tmp = os.tmpdir();
+  const entries = await fs.readdir(tmp).catch(() => [] as string[]);
+  let removed = 0;
+  for (const name of entries) {
+    if (!TMP_SWEEP_PREFIXES.some((p) => name.startsWith(p))) continue;
+    await fs.rm(path.join(tmp, name), { recursive: true, force: true }).catch(() => {});
+    removed += 1;
+  }
+  if (removed > 0) console.log(`\n[cleanup] 已清扫测试临时目录 ${removed} 个（${tmp}）`);
 }
 
 const invokedDirectly = process.argv[1] !== undefined && process.argv[1].endsWith("run.ts");

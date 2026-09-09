@@ -83,7 +83,6 @@ export interface AgentState {
  *   「闲聊别调工具」这类为弱模型兜底的规则不再注入（设计哲学：模型变强，能力消失）。
  */
 export function buildSystemPrompt(
-  cwd: string,
   toolNames: string[],
   maturity: ModelMaturity = "budget",
 ): string {
@@ -116,7 +115,6 @@ export function buildSystemPrompt(
   const numbered = workRules.map((rule, i) => `${i + 1}. ${rule}`);
   return [
     "你是一个在终端里工作的编码代理。",
-    `当前工作目录：${cwd}`,
     `运行时：${process.platform} / Node ${process.version}`,
     // Environment 支柱：日期与 shell 是模型最高频的两个猜测源（版本 pin、
     // 「最近」类判断、zsh/bash 语法差异）——事实给足，不写补救规则
@@ -159,7 +157,7 @@ export function createInitialState(options: {
 }): AgentState {
   const base =
     options.systemPrompt ??
-    buildSystemPrompt(options.cwd, options.tools.map((t) => t.name), options.model.maturity);
+    buildSystemPrompt(options.tools.map((t) => t.name), options.model.maturity);
   const append = options.appendSystemPrompt ?? "";
   const composedSystemPrompt =
     append.length > 0 ? `${base}\n\n# 追加指令\n\n${append}` : base;

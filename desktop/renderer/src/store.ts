@@ -30,6 +30,8 @@ export interface Turn {
   id: number;
   role: "user" | "assistant";
   text: string;
+  /** 本轮累计的思考过程（thinking delta 顺序拼接），v1 隐藏、现折叠展示 */
+  thinking: string;
   toolCalls: ToolCallState[];
   live: boolean;
   /** user 消息随带的图片附件（data URL），仅 user turn 有 */
@@ -132,7 +134,7 @@ export const useSessionStore = create<State & Actions>((set, get) => ({
   setInfo: (info) => set({ info }),
 
   appendUser: (text) =>
-    set((s) => ({ turns: [...s.turns, { id: nextTurnId(), role: "user", text, toolCalls: [], live: false }] })),
+    set((s) => ({ turns: [...s.turns, { id: nextTurnId(), role: "user", text, thinking: "", toolCalls: [], live: false }] })),
 
   reset: () =>
     set({
@@ -242,12 +244,14 @@ export const useSessionStore = create<State & Actions>((set, get) => ({
           return {
             status: "running",
             errorMessage: null,
-            turns: [...s.turns, { id: nextTurnId(), role: "assistant", text: "", toolCalls: [], live: true }],
+            turns: [...s.turns, { id: nextTurnId(), role: "assistant", text: "", thinking: "", toolCalls: [], live: true }],
           };
         case "text":
           return { turns: mutateLastAssistant(s.turns, (t) => ({ ...t, text: t.text + e.delta })) };
         case "thinking":
-          return s; // v1 不展示思考内容
+          return {
+            turns: mutateLastAssistant(s.turns, (t) => ({ ...t, thinking: t.thinking + e.delta })),
+          };
         case "tool_start":
           return {
             turns: mutateLastAssistant(s.turns, (t) => ({
@@ -304,6 +308,7 @@ export const useSessionStore = create<State & Actions>((set, get) => ({
                 id: nextTurnId(),
                 role: "user" as const,
                 text: e.text,
+                thinking: "",
                 toolCalls: [],
                 live: false,
                 ...(e.images !== undefined && e.images.length > 0 ? { images: e.images } : {}),

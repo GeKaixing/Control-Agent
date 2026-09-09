@@ -191,6 +191,12 @@ interface StoredConfig {
   version: number;
   /** 上次选定的模型 spec（"provider:id[:strong|budget]"） */
   model?: string;
+  /**
+   * 工作目录覆写（桌面端专用）：用户显式指定的项目文件夹绝对路径。
+   * 缺省 = 桌面端用默认工作区（桌面上自动创建的 c-agent 文件夹）。
+   * CLI 不读这个字段——CLI 的 cwd 本来就是用户 shell 所在目录。
+   */
+  cwd?: string;
   /** 上次选定的自定义模型完整参数；与 model 互斥——最后一次的选择是唯一真相 */
   customModel?: StoredCustomModel;
   updatedAt?: number;
@@ -254,6 +260,19 @@ export async function readSavedCustomModel(cwd: string): Promise<StoredCustomMod
   };
 }
 
+/**
+ * 读取用户指定的工作目录（桌面端用）。非空字符串才认；不校验存在性——
+ * 存在性/可创建性由调用方决定（不存在可以 mkdir，或报错提示用户改配置）。
+ * 缺省返回 null = 调用方走自己的默认值。
+ */
+export async function readSavedWorkspaceCwd(cwd: string): Promise<string | null> {
+  const data = await readConfig(cwd);
+  const dir = data?.cwd;
+  if (typeof dir !== "string") return null;
+  const trimmed = dir.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 async function writeConfig(cwd: string, stored: StoredConfig): Promise<void> {
   await mkdir(path.join(cwd, ".c-agent"), { recursive: true });
   const file = configPath(cwd);
@@ -268,8 +287,11 @@ async function writeConfig(cwd: string, stored: StoredConfig): Promise<void> {
  * 互斥：写 spec 清掉 customModel（最后一次的选择是唯一真相）。
  */
 export async function saveModelSpec(cwd: string, spec: string): Promise<void> {
+  // 先读旧值展开：cwd 等模型无关字段不能因为换模型被抹掉
+  const prev = await readConfig(cwd);
   await writeConfig(cwd, {
     version: CONFIG_VERSION,
+    ...(prev?.cwd !== undefined ? { cwd: prev.cwd } : {}),
     model: spec,
     updatedAt: Date.now(),
   });
@@ -280,8 +302,11 @@ export async function saveModelSpec(cwd: string, spec: string): Promise<void> {
  * 恢复路径也会回写（幂等同值），无害。
  */
 export async function saveCustomModel(cwd: string, custom: StoredCustomModel): Promise<void> {
+  // 先读旧值展开：cwd 等模型无关字段不能因为换模型被抹掉
+  const prev = await readConfig(cwd);
   await writeConfig(cwd, {
     version: CONFIG_VERSION,
+    ...(prev?.cwd !== undefined ? { cwd: prev.cwd } : {}),
     customModel: custom,
     updatedAt: Date.now(),
   });

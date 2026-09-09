@@ -44,6 +44,7 @@ export {
   modelSpecString,
   readSavedCustomModel,
   readSavedModelSpec,
+  readSavedWorkspaceCwd,
   saveCustomModel,
   saveModelSpec,
   saveSession,

@@ -20,7 +20,9 @@
  */
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, screen, shell, type IpcMainInvokeEvent } from "electron";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import { ConnectorLoader } from "../../src/connector/loader/connector-loader.js";
@@ -37,6 +39,7 @@ import { assembleSession } from "../../src/session.js";
 import {
   readSavedCustomModel,
   readSavedModelSpec,
+  readSavedWorkspaceCwd,
   saveCustomModel,
   saveModelSpec,
   type StoredCustomModel,
@@ -621,14 +624,64 @@ async function createWindow(deps: StartDeps): Promise<void> {
   await loadRenderer(mainWindow, deps);
 }
 
+/**
+ * 定位编译产物里的 connectors-mcp 目录。
+ *
+ * rootDir 布局决定产物深嵌一层「仓库所在目录名」：`dist/<仓库目录名>/connectors-mcp`。
+ * 这个目录名是环境的产物（项目在 g/ 下就叫 g，搬到 c/ 下就叫 c），不能写死——
+ * 以前写死 ["dist/g/connectors-mcp", "dist/connectors-mcp"] 两个候选，项目搬到 c/
+ * 后两个都落空，connector manifest 复制与桌面端加载全部静默跳过（0 工具无人报错）。
+ * 改成扫 dist/ 下各子目录找真正存在的 connectors-mcp（与 entry.mjs resolveDistMain 同坑同修）。
+ */
+function resolveDistConnectorsDir(distRoot: string): string | null {
+  const direct = path.join(distRoot, "connectors-mcp");
+  if (existsSync(direct)) return direct;
+  try {
+    for (const entry of readdirSync(distRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const candidate = path.join(distRoot, entry.name, "connectors-mcp");
+      if (existsSync(candidate)) return candidate;
+    }
+  } catch {
+    // dist 不存在（未编译）或读不了，按没有 connector 处理
+  }
+  return null;
+}
+
+/**
+ * 解析会话工作目录（与配置锚点 app home 解耦）：
+ * 1. config.json 的 `cwd` 字段（用户显式指定的项目文件夹）优先——目录不存在
+ *    就 mkdir（recursive 对已存在目录是 no-op），用户指定的意图就是让它可用；
+ * 2. 缺省 = 桌面上的中性工作区文件夹 workspace（没有则创建）——刻意不叫
+ *    c-agent，避免 agent 把工作区误认成 c-agent 项目本身；MEMORY.md、
+ *    相对路径产物都落在这个独立目录，不污染 app home。
+ * 创建失败不阻断启动——回落 app home 并 console 留痕（与 connectors start
+ * 失败同一策略：跳过但不崩）。
+ */
+async function resolveSessionCwd(): Promise<string> {
+  const appHome = process.cwd();
+  const configured = await readSavedWorkspaceCwd(appHome);
+  const target = configured ?? path.join(os.homedir(), "Desktop", "workspace");
+  try {
+    await mkdir(target, { recursive: true });
+    return target;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[session] 工作目录 ${target} 不可用（${msg}），回落 ${appHome}`);
+    return appHome;
+  }
+}
+
 async function bootstrap(deps: StartDeps): Promise<void> {
   // 必须放在 app.whenReady() 之前。关掉 Chromium 的 OS-level sandbox（renderer / GPU /
   // network 三个 helper 进程在限制性沙箱里启动时会撞 `sandbox initialization failed:
   // Operation not permitted` 然后连环崩，GPU 报 SIGTRAP 直接拉走主进程）。
-  // CI / Docker / 限制性 sandbox 环境的通用修法。只在 darwin 开：这些限制来自
-  // macOS 上 WorkBuddy IDE 的注入沙箱；Windows / Linux 正常环境不需要，
-  // no-sandbox 在那边纯属白降安全性。
-  if (process.platform === "darwin") {
+  // macOS：WorkBuddy IDE 的注入沙箱导致，CI / Docker 同理，通用修法。
+  // Windows：实测（2026-09）本机 GPU 进程也会连环 `exited unexpectedly: exit_code=1`
+  // 后 FATAL `GPU process isn't usable. Goodbye.` 退出——GPU 驱动 / 环境注入都可能
+  // 触发，且发生在命令行参数够不到的主进程内部，必须在代码里追加。
+  // 单机开发工具，v1 不分发，放弃 GPU 加速与 OS sandbox 换「任何启动方式都能起」。
+  if (process.platform === "darwin" || process.platform === "win32") {
     app.commandLine.appendSwitch("no-sandbox");
     app.commandLine.appendSwitch("disable-gpu");
   }
@@ -663,22 +716,23 @@ async function bootstrap(deps: StartDeps): Promise<void> {
   const savedCustomModel =
     modelEnvSet || savedModelSpec !== null ? null : await readSavedCustomModel(desktopCwd);
 
+  // 会话工作目录与配置锚点分离：agent 干活的地方（见 resolveSessionCwd），
+  // config / connectors 仍锚在 app home（process.cwd()）——持久化路径不随会话漂移
+  const sessionCwd = await resolveSessionCwd();
+  console.log(`[session] 工作目录：${sessionCwd}`);
+
   // 工具型 connector：扫描编译产物里的 connectors-mcp（Loader 会动态 import 编译后的
   // .js；源码 .ts 只有 tsx 运行时能加载，Electron main 里不行），start 后把
   // extraTools 喂给 assembleSession。单个 connector start 失败不阻断启动——
   // 跳过它的工具，console 留痕（与 CLI --connectors 行为一致）。
   // deps.__dirname 是 entry.mjs 所在目录（desktop/main），编译产物在
-  // dist/<仓库目录名>/connectors-mcp（rootDir 'g' 布局）。必须扫 dist——
+  // dist/<仓库目录名>/connectors-mcp（rootDir 布局）。必须扫 dist——
   // Loader 动态 import 的是编译后 .js，源码 .ts 在 Electron main 里加载不了
   // （tsx 运行时才行），扫到源码目录只会刷一屏 "Cannot find module .../index.ts"。
   toolRuntime = new ConnectorRuntime({ cwd: desktopCwd });
-  const connectorDirs = [
-    path.resolve(deps.__dirname, "dist/g/connectors-mcp"),
-    path.resolve(deps.__dirname, "dist/connectors-mcp"),
-  ];
-  const connectorsDir = connectorDirs.find((p) => existsSync(p));
+  const connectorsDir = resolveDistConnectorsDir(path.join(deps.__dirname, "dist"));
   let connectorTools: ReturnType<ConnectorRuntime["extraTools"]> = [];
-  if (connectorsDir !== undefined) {
+  if (connectorsDir !== null) {
     const { loaded, failed } = await new ConnectorLoader({ paths: [connectorsDir] }).scan();
     for (const f of failed) {
       console.warn(`[connectors] load failed: ${f.rootDir} -> ${f.error}`);
@@ -695,7 +749,7 @@ async function bootstrap(deps: StartDeps): Promise<void> {
   }
 
   const assembled = await assembleSession({
-    cwd: desktopCwd,
+    cwd: sessionCwd,
     ...(savedModelSpec !== null ? { modelSpec: savedModelSpec } : {}),
     ...(connectorTools.length > 0 ? { extraTools: connectorTools } : {}),
   });
@@ -705,6 +759,9 @@ async function bootstrap(deps: StartDeps): Promise<void> {
   session = new SessionManager(assembled, {
     emit,
     approvalPrompt,
+    // cwd 与 state.cwd 同源（resolveSessionCwd 的结果）：info 回传、审批详情、
+    // @ 引用 popover 的文件列表都靠它，不能回落 process.cwd() 造成两套 cwd
+    cwd: () => sessionCwd,
     // 模型选择落盘（setModel / setEndpoint 触发 spec 版；setCustomModel 触发
     // customModel 版，两者互斥）。写失败只留痕不阻断——与 CLI 同一策略。
     persistModel: (spec) => {
