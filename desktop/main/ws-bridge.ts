@@ -158,6 +158,9 @@ export default class WsDisplayBridge implements Connector, DisplaySink {
         lastUserPrompt: null,
         toolsByCategory: { skill: [], tool: [], mcp: [], plugin: [], extension: [] },
         baseUrlPresets: [],
+        localPreview: false,
+        alwaysOnTop: false,
+        localServers: [],
       };
     }
     socket.send(encodeWsFrame({ kind: "hello", info }));

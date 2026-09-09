@@ -24,7 +24,7 @@
  * 事件序号 seq：全局递增，渲染层用来区分「新事件」。
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -68,7 +68,7 @@ const READY_TIMEOUT_MS = 15000;
 /** stdout 文件轮询间隔 */
 const POLL_INTERVAL_MS = 150;
 
-/** 一次听写会话的运行时状态 */
+/** 一次 macOS 听写会话的运行时状态 */
 interface DictationSession {
   pid: number;
   dir: string;
@@ -82,8 +82,22 @@ interface DictationSession {
   startedAt: number;
 }
 
+/** 一次 Windows 听写会话的运行时状态（管道直读，无文件中转） */
+interface WinSession {
+  child: ChildProcessWithoutNullStreams;
+  /** stdout 行缓冲（数据事件按块到达，按 \n 切行） */
+  buffer: string;
+  gotReady: boolean;
+  gotFinal: boolean;
+  /** 用户主动停止中：exit 时不再报「意外退出」 */
+  stopping: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
 export class DictationController {
   private session: DictationSession | null = null;
+  /** Windows 会话：Electron 直接 spawn helper，句柄/管道都在手上，无需文件轮询 */
+  private win: WinSession | null = null;
   private seq = 0;
   private readonly events: DictationEvents;
   /** 解析 helper 的基准目录：desktop/main（entry.mjs 所在目录）。 */
@@ -95,7 +109,136 @@ export class DictationController {
   }
 
   get isDictating(): boolean {
-    return this.session !== null;
+    return this.session !== null || this.win !== null;
+  }
+
+  /**
+   * 解析 Windows helper（dictate.exe）。候选：baseDir/../native/win（entry.mjs
+   * 的 desktop/main → desktop/native/win）→ process.cwd()/desktop/native/win。
+   */
+  resolveWindowsHelper(): string | undefined {
+    const candidates: string[] = [];
+    if (this.baseDir !== undefined) {
+      candidates.push(path.join(this.baseDir, "..", "native", "win", "dictate.exe"));
+    }
+    candidates.push(path.join(process.cwd(), "desktop", "native", "win", "dictate.exe"));
+    for (const exe of candidates) {
+      if (fs.existsSync(exe)) return exe;
+    }
+    return undefined;
+  }
+
+  /**
+   * Windows 路径：spawn dictate.exe（WinRT SpeechRecognizer），事件走 stdout
+   * 管道直读（协议与 macOS helper 一致）；停机 = 关 stdin（helper 内 EOF →
+   * StopAsync → 输出 final → exit 0），kill 只做兜底——Windows 的 SIGTERM
+   * 是 TerminateProcess，没有优雅停机的机会。
+   */
+  private startWindows(): void {
+    const exe = this.resolveWindowsHelper();
+    if (exe === undefined) {
+      this.events.onEvent(
+        "error",
+        "找不到 Windows 听写 helper（desktop/native/win/dictate.exe），先运行 npm run build:dictate-win 编译",
+        this.nextSeq(),
+      );
+      return;
+    }
+    const locale = process.env["DICTATE_LOCALE"] ?? "zh-CN";
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(exe, ["--locale", locale], { stdio: ["pipe", "pipe", "pipe"] });
+    } catch (err) {
+      this.events.onEvent(
+        "error",
+        `启动听写 helper 失败：${err instanceof Error ? err.message : String(err)}`,
+        this.nextSeq(),
+      );
+      return;
+    }
+    const session: WinSession = {
+      child,
+      buffer: "",
+      gotReady: false,
+      gotFinal: false,
+      stopping: false,
+      timer: null,
+    };
+    this.win = session;
+
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      session.buffer += chunk;
+      let idx = session.buffer.indexOf("\n");
+      while (idx !== -1) {
+        const line = session.buffer.slice(0, idx);
+        session.buffer = session.buffer.slice(idx + 1);
+        const parsed = parseDictationLine(line);
+        if (parsed !== null) this.winDispatch(session, parsed.kind, parsed.text);
+        idx = session.buffer.indexOf("\n");
+      }
+    });
+    let stderrTail = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderrTail = (stderrTail + chunk).slice(-300);
+    });
+    child.on("error", (err) => {
+      this.failWin(session, `启动听写 helper 失败：${err.message}`);
+    });
+    child.on("exit", () => {
+      if (this.win !== session) return;
+      if (session.gotFinal) {
+        this.win = null;
+        return;
+      }
+      this.failWin(
+        session,
+        session.stopping
+          ? "听写已停止（未等到识别结果）"
+          : `听写 helper 意外退出${stderrTail.trim().length > 0 ? `：${stderrTail.trim()}` : ""}`,
+      );
+    });
+    session.timer = setTimeout(() => {
+      if (this.win === session && !session.gotReady) {
+        this.failWin(session, "听写 helper 未就绪（可能在等麦克风授权弹窗，或系统缺少语音识别功能包）");
+      }
+    }, READY_TIMEOUT_MS);
+  }
+
+  /** Windows helper 事件分发：终态（final / error）后收尾 */
+  private winDispatch(session: WinSession, kind: string, text: string): void {
+    if (kind !== "ready" && kind !== "partial" && kind !== "final" && kind !== "error") return;
+    if (kind === "ready") session.gotReady = true;
+    if (kind === "final") session.gotFinal = true;
+    this.events.onEvent(kind, text, this.nextSeq());
+    if (kind === "final" || kind === "error") this.teardownWin(session);
+  }
+
+  private teardownWin(session: WinSession): void {
+    if (this.win !== session) return;
+    this.win = null;
+    if (session.timer !== null) clearTimeout(session.timer);
+    // final 后 helper 自行退出；延迟兜底强杀，防僵尸进程
+    setTimeout(() => {
+      try {
+        if (session.child.exitCode === null) session.child.kill();
+      } catch {
+        // 已退出
+      }
+    }, 1000);
+  }
+
+  private failWin(session: WinSession, message: string): void {
+    if (this.win !== session) return;
+    this.win = null;
+    if (session.timer !== null) clearTimeout(session.timer);
+    try {
+      session.child.kill();
+    } catch {
+      // 已退出
+    }
+    this.events.onEvent("error", message, this.nextSeq());
   }
 
   /**
@@ -116,11 +259,15 @@ export class DictationController {
   }
 
   start(): void {
-    if (this.session !== null) return;
+    if (this.session !== null || this.win !== null) return;
+    if (process.platform === "win32") {
+      this.startWindows();
+      return;
+    }
     if (process.platform !== "darwin") {
       // helper 是 swiftc 编译的 macOS bundle（SFSpeechRecognizer + TCC），
-      // Windows/Linux 上直接给明确提示，别让用户看到「找不到 helper」的误导信息
-      this.events.onEvent("error", "听写目前仅支持 macOS", this.nextSeq());
+      // Linux 上直接给明确提示，别让用户看到「找不到 helper」的误导信息
+      this.events.onEvent("error", "听写目前仅支持 macOS 与 Windows", this.nextSeq());
       return;
     }
     const bundle = this.resolveHelper();
@@ -258,8 +405,28 @@ export class DictationController {
     if (kind === "final" || kind === "error") this.teardown(session);
   }
 
-  /** 优雅停止：SIGTERM（helper 有停机 handler → 输出 final → exit 0），超时 SIGKILL */
+  /** 优雅停止：Windows 先关 stdin（helper EOF → final），超时强杀；macOS 走 SIGTERM */
   stop(): void {
+    const winSession = this.win;
+    if (winSession !== null) {
+      winSession.stopping = true;
+      try {
+        winSession.child.stdin.end();
+      } catch {
+        // 管道已坏，走下面的强杀兜底
+      }
+      setTimeout(() => {
+        if (this.win === winSession && !winSession.gotFinal) {
+          try {
+            winSession.child.kill();
+          } catch {
+            // 已退出
+          }
+        }
+      }, FINAL_GRACE_MS);
+      return;
+    }
+
     const session = this.session;
     if (session === null) return;
     try {

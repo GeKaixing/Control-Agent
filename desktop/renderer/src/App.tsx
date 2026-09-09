@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { useSessionStore } from "./store";
+import { AskUserCard } from "./components/AskUserCard";
 import { Composer } from "./components/Composer";
 import { MessageList } from "./components/MessageList";
 import { StatusBar } from "./components/StatusBar";
@@ -23,6 +24,7 @@ export function App({ showComposer = true }: { showComposer?: boolean }): React.
   const errorMessage = useSessionStore((s) => s.errorMessage);
   const notice = useSessionStore((s) => s.notice);
   const sessionTitle = useSessionStore((s) => s.sessionTitle);
+  const pendingAsks = useSessionStore((s) => s.pendingAsks);
   const handleEvent = useSessionStore((s) => s.handleEvent);
   const setInfo = useSessionStore((s) => s.setInfo);
   const newSession = useSessionStore((s) => s.newSession);
@@ -138,6 +140,10 @@ export function App({ showComposer = true }: { showComposer?: boolean }): React.
         void window.api.info().then(setInfo);
       } else if (e.t === "ui_action" && e.action === "sessions-changed") {
         void useSessionStore.getState().applyRemoteSwitch();
+      } else if (e.t === "tool_end" && e.name === "bash") {
+        // bash 跑完：主进程可能刚从输出里检测到新的本地服务，重拉 info
+        // 让状态栏「本地服务」角标实时跟上（info() 是本地计算，代价可忽略）
+        void window.api.info().then(setInfo);
       }
     });
     return off;
@@ -190,6 +196,14 @@ export function App({ showComposer = true }: { showComposer?: boolean }): React.
             </button>
           )}
         </div>
+        {/* 模型提问（ask_user 工具）：置顶在 Composer 上方，答完由 ask_user_done 撤下 */}
+        {pendingAsks.length > 0 && (
+          <div className="flex flex-col gap-2 px-3 pb-1">
+            {pendingAsks.map((a) => (
+              <AskUserCard key={a.id} ask={a} />
+            ))}
+          </div>
+        )}
         {/* 不留消息区空白：Composer 直接贴在拖动条下方，窗口高度=内容高度 */}
         <Composer
           status={status}
@@ -208,6 +222,13 @@ export function App({ showComposer = true }: { showComposer?: boolean }): React.
       {errorMessage !== null && (
         <div className="border-b border-destructive/50 bg-destructive/15 px-4 py-2 text-xs text-destructive">
           ⚠ {errorMessage}
+        </div>
+      )}
+      {pendingAsks.length > 0 && (
+        <div className="flex flex-col gap-2 px-4 py-2">
+          {pendingAsks.map((a) => (
+            <AskUserCard key={a.id} ask={a} />
+          ))}
         </div>
       )}
       <MessageList turns={turns} />

@@ -15,7 +15,7 @@
  * compact 旧分支），只在 --resume 时整体还原。
  */
 
-import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { activeBranch, type AgentState, type MessageNode } from "./state.js";
 import type { ModelRef } from "../types.js";
@@ -159,6 +159,24 @@ export async function latestSessionId(cwd: string): Promise<string | null> {
 export async function sessionFileExists(cwd: string, id: string): Promise<boolean> {
   try {
     await stat(path.join(sessionsDir(cwd), `${id}.json`));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 会话 id 合法字符：字母数字 + _ @ . -，且不能以点开头——堵死路径穿越（../、\\、绝对路径） */
+const SESSION_ID_PATTERN = /^[A-Za-z0-9_@][A-Za-z0-9_.@-]*$/;
+
+/**
+ * 删除指定会话文件。id 非法（含路径分隔符等）或文件不存在 → false，不抛错——
+ * 与本模块「坏输入静默回退」同一纪律。删除当前会话的拦截在调用方（REPL）做：
+ * 这里只管字节，不知道「哪份是活着的」。
+ */
+export async function deleteSession(cwd: string, id: string): Promise<boolean> {
+  if (!SESSION_ID_PATTERN.test(id)) return false;
+  try {
+    await unlink(path.join(sessionsDir(cwd), `${id}.json`));
     return true;
   } catch {
     return false;

@@ -111,6 +111,14 @@ runRepl(opts: {
 斜杠命令：`/exit` / `/help` / `/tools` / `/usage` / `/clear` / `/verbose` / `/model <spec>`。
 主要两件事：把内层循环处理 steering 合并进 user 输入；按 model 重置 agent。
 
+### ask_user 通道（createReplAskUser）
+
+`runRepl()` 启动时经 `setAskUserHandler(createReplAskUser({ input, output }))` 给
+`ask_user` 工具注入 REPL 实现，`finally` 里撤下。模型提问时：问题 + 选项渲染到
+output，借 `input.ask()` 等下一行——agent 运行期间主循环不占 ask() 的 waiter，
+不会打架，用户此时敲的行进答案通道而不是 steering。纯数字输入落在选项序号范围
+内会映射成选项原文回给模型；agent abort / EOF → 返回 `null`，工具侧转成 fail。
+
 ## Markdown 渲染的「终端够用」子集
 
 `markdown.ts` 自己写、不引第三方依赖，覆盖：

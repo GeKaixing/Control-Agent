@@ -36,6 +36,9 @@ const FAKE_INFO: InfoPayload = {
   contextBreakdown: { systemPrompt: 0, tools: 0, connectors: 0, skills: 0, messages: 0 },
   toolsByCategory: { skill: [], tool: [], mcp: [], plugin: [], extension: [] },
   baseUrlPresets: [],
+  localPreview: false,
+  alwaysOnTop: false,
+  localServers: [],
 };
 
 /** 起一个桥（port 0 = 系统随机），返回 { bridge, port, dispatchLog } */
@@ -156,6 +159,24 @@ test("dispatchApi: submit 抛错包装成 {ok:false, error}", async () => {
   const result = (await dispatchApi(session, "submit", ["hi"])) as { ok: boolean; error?: string };
   assert.equal(result.ok, false);
   assert.equal(result.error, "boom");
+});
+
+test("dispatchApi: answerAsk 转发答案；坏参数静默丢弃", async () => {
+  const calls: { id: string; answer: string }[] = [];
+  const session = stubSession({
+    answerAsk: (id: string, answer: string) => {
+      calls.push({ id, answer });
+    },
+  });
+  await dispatchApi(session, "answerAsk", ["ask_1", "方案 B"]);
+  await dispatchApi(session, "answerAsk", ["ask_2", "   "]); // 空白原样透传（trim 归 session）
+  await dispatchApi(session, "answerAsk", [42, "x"]); // 非 string id → 丢弃
+  await dispatchApi(session, "answerAsk", []); // 缺参 → 丢弃
+  await dispatchApi(session, "answerAsk", ["ask_3", 42]); // 非 string answer → 空串
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[0], { id: "ask_1", answer: "方案 B" });
+  assert.deepEqual(calls[1], { id: "ask_2", answer: "   " });
+  assert.deepEqual(calls[2], { id: "ask_3", answer: "" });
 });
 
 test("dispatchApi: 未知方法抛错（WS 层会转成 ok:false）", async () => {

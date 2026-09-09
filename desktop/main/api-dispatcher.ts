@@ -17,6 +17,7 @@ export type ApiMethodName =
   | "submit"
   | "steer"
   | "abort"
+  | "answerAsk"
   | "setModel"
   | "setCustomModel"
   | "setMode"
@@ -26,6 +27,8 @@ export type ApiMethodName =
   | "setApprovalMode"
   | "setAutoCompact"
   | "setMsgWindow"
+  | "setLocalPreview"
+  | "setAlwaysOnTop"
   | "pause"
   | "resume"
   | "getUsage"
@@ -33,6 +36,8 @@ export type ApiMethodName =
   | "switchSession"
   | "switchTo"
   | "listSessions"
+  | "listPersistedSessions"
+  | "deleteSession"
   | "listFiles"
   | "listModels"
   | "listCustomModels";
@@ -74,6 +79,14 @@ export async function dispatchApi(
     case "abort":
       session.abort();
       return undefined;
+    case "answerAsk": {
+      const id = args[0];
+      const answer = args[1];
+      // 参数不合规静默丢弃（问答卡是临时 UI，迟到/坏帧不值得报错打扰用户）
+      if (typeof id !== "string" || id.length === 0) return undefined;
+      session.answerAsk(id, typeof answer === "string" ? answer : "");
+      return undefined;
+    }
     case "setModel": {
       const spec = args[0];
       if (typeof spec !== "string" || spec.length === 0) return { model: "" };
@@ -118,6 +131,16 @@ export async function dispatchApi(
       session.setMsgWindow(args[0] === true);
       return undefined;
     }
+    case "setLocalPreview": {
+      session.setLocalPreview(args[0] === true);
+      return undefined;
+    }
+    case "setAlwaysOnTop": {
+      // 只更新偏好；窗口的实际置顶/取消在 index.ts 的 IPC handler 里做
+      // （dispatcher 是纯逻辑层，不能碰 BrowserWindow）
+      session.setAlwaysOnTop(args[0] === true);
+      return undefined;
+    }
     case "pause":
       session.pause();
       return undefined;
@@ -139,6 +162,15 @@ export async function dispatchApi(
     }
     case "listSessions":
       return session.listSessions();
+    case "listPersistedSessions":
+      return session.listPersistedSessions();
+    case "deleteSession": {
+      const id = args[0];
+      if (typeof id !== "string" || id.length === 0) {
+        return { ok: false, error: "缺少会话 id" };
+      }
+      return session.deletePersistedSession(id);
+    }
     case "listFiles": {
       const query = args[0];
       return session.listFiles(typeof query === "string" ? query : "");

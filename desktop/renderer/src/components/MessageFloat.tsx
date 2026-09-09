@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Copy, X } from "lucide-react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -11,7 +11,11 @@ import type { InfoPayload, WireEvent } from "../../../shared/api";
  * 独立于主窗口存在（可拖到屏幕任意角落，主窗口关了仍保留）。
  *
  * 顶部 32px 是拖动条（app-region: drag）：会话标题 + 运行状态点 + 关闭按钮；
- * 正文实时聚合 agent 回复流（user_text / text delta / 工具行），自动滚底。
+ * 正文实时聚合 agent 回复流（user_text / text / 工具行），自动滚底。
+ * 与主窗口 store 同一套 turn 模型：start 建一个 assistant turn（live），
+ * thinking / text delta 都挂进这个 turn——思考折叠段和「思考中」状态
+ * 渲染在 assistant 气泡内部，而非独立行。思考流按 hermes TUI 的交互：
+ * 流式期间自动展开灰字跟随滚动，思考结束（正文/工具接棒）自动收起。
  * assistant 消息按 markdown 渲染（react-markdown + gfm 表格）；user 消息是用户
  * 原话，保持纯文本。每条消息 hover 出现「复制」按钮（复制的是原始 markdown
  * 源文本——粘到别处还能再编辑）；工具行只有工具名，不给按钮。
@@ -23,6 +27,12 @@ interface FloatMsg {
   id: number;
   role: "user" | "assistant" | "tool";
   text: string;
+  /** assistant 专用：本轮累计思考过程（thinking delta 顺序拼接） */
+  thinking?: string;
+  /** assistant 专用：本轮是否仍在流式（end / error 时翻转） */
+  live?: boolean;
+  /** assistant 专用：思考阶段是否已结束（正文 / 工具接棒），驱动思考块自动收起 */
+  thinkingDone?: boolean;
   /** 工具行专用：ok 状态（pending / ok / fail） */
   ok?: boolean | "pending";
 }
@@ -31,6 +41,38 @@ const MAX_MSGS = 200;
 
 let seq = 0;
 const nextId = (): number => ++seq;
+
+/** 新建一个流式中的 assistant turn（start 事件 / 兜底惰性创建共用） */
+function newAssistantTurn(patch: Partial<FloatMsg> = {}): FloatMsg {
+  return {
+    id: nextId(),
+    role: "assistant",
+    text: "",
+    thinking: "",
+    live: true,
+    thinkingDone: false,
+    ...patch,
+  };
+}
+
+/**
+ * 改写最后一个流式中的 assistant turn（倒序找，中间隔着工具行也能命中——
+ * 工具行是独立线性行，不打断 turn 归属）。找不到返回 null，调用方自行建新 turn。
+ */
+function mutateLastLiveAssistant(
+  prev: FloatMsg[],
+  fn: (m: FloatMsg) => FloatMsg,
+): FloatMsg[] | null {
+  for (let i = prev.length - 1; i >= 0; i -= 1) {
+    const m = prev[i];
+    if (m !== undefined && m.role === "assistant" && m.live === true) {
+      const out = [...prev];
+      out[i] = fn(m);
+      return out;
+    }
+  }
+  return null;
+}
 
 /**
  * 小窗专用的 markdown 组件样式映射：340px 宽下的紧凑排版。
@@ -134,17 +176,32 @@ export function MessageFloat(): React.ReactElement {
         return;
       }
       if (e.t === "start") {
+        // 与主窗口 store 同款：start 即建本轮 assistant turn，后续
+        // thinking / text delta 都挂进去——「思考中」因此落在气泡内部
         setRunning(true);
+        setMsgs((prev) => [...prev.slice(-(MAX_MSGS - 1)), newAssistantTurn()]);
         return;
       }
       if (e.t === "end" || e.t === "error") {
         setRunning(false);
-        if (e.t === "error") {
-          setMsgs((prev) => [
-            ...prev.slice(-(MAX_MSGS - 1)),
-            { id: nextId(), role: "assistant", text: `⚠ ${e.message}` },
-          ]);
-        }
+        setMsgs((prev) => {
+          const closed = prev.map((m, i, arr) =>
+            i === arr.length - 1 && m.role === "assistant" && m.live === true
+              ? { ...m, live: false }
+              : m,
+          );
+          // 整轮空转的 turn（没等到任何 thinking / text 就结束）不留空壳气泡
+          const pruned = closed.filter(
+            (m) => !(m.role === "assistant" && m.live === false && m.text.length === 0 && (m.thinking ?? "").length === 0),
+          );
+          if (e.t === "error") {
+            return [
+              ...pruned.slice(-(MAX_MSGS - 1)),
+              { id: nextId(), role: "assistant", text: `⚠ ${e.message}`, thinking: "", live: false, thinkingDone: true },
+            ];
+          }
+          return pruned;
+        });
         return;
       }
       if (e.t === "user_text") {
@@ -154,23 +211,42 @@ export function MessageFloat(): React.ReactElement {
         ]);
         return;
       }
-      if (e.t === "text") {
-        // delta 追加到最后一条 assistant（没有就新建）；追加沿用原 id，
-        // 这样正在流式输出的消息被复制时，打勾标记不会跳到别的行上
+      if (e.t === "thinking") {
+        // 思考流挂进本轮 assistant turn 的 thinking 字段（气泡内的折叠段）
         setMsgs((prev) => {
-          const last = prev[prev.length - 1];
-          if (last !== undefined && last.role === "assistant" && last.ok === undefined) {
-            return [...prev.slice(0, -1), { ...last, text: last.text + e.delta }];
-          }
-          return [...prev.slice(-(MAX_MSGS - 1)), { id: nextId(), role: "assistant", text: e.delta }];
+          const updated = mutateLastLiveAssistant(prev, (m) => ({
+            ...m,
+            thinking: (m.thinking ?? "") + e.delta,
+          }));
+          if (updated !== null) return updated;
+          // 弹窗中途打开、没赶上 start 时惰性补建
+          return [...prev.slice(-(MAX_MSGS - 1)), newAssistantTurn({ thinking: e.delta })];
+        });
+        return;
+      }
+      if (e.t === "text") {
+        // 正文接棒 = 思考阶段结束（thinkingDone 置位让思考块自动收起）；
+        // 追加沿用原 turn id，复制打勾标记不会跳行
+        setMsgs((prev) => {
+          const updated = mutateLastLiveAssistant(prev, (m) => ({
+            ...m,
+            text: m.text + e.delta,
+            thinkingDone: true,
+          }));
+          if (updated !== null) return updated;
+          return [...prev.slice(-(MAX_MSGS - 1)), newAssistantTurn({ text: e.delta, thinkingDone: true })];
         });
         return;
       }
       if (e.t === "tool_start") {
-        setMsgs((prev) => [
-          ...prev.slice(-(MAX_MSGS - 1)),
-          { id: nextId(), role: "tool", text: e.name, ok: "pending" },
-        ]);
+        setMsgs((prev) => {
+          // 工具执行同样宣告思考阶段结束
+          const marked = mutateLastLiveAssistant(prev, (m) => ({ ...m, thinkingDone: true }));
+          return [
+            ...(marked ?? prev).slice(-(MAX_MSGS - 1)),
+            { id: nextId(), role: "tool", text: e.name, ok: "pending" },
+          ];
+        });
         return;
       }
       if (e.t === "tool_end") {
@@ -252,18 +328,94 @@ export function MessageFloat(): React.ReactElement {
           return (
             <div key={m.id} className="group flex items-start justify-start gap-1">
               {/* assistant 走 markdown：去掉外层的 whitespace-pre-wrap（不然源文本
-                  换行和 <p> 的 margin 叠出双倍空行）；min-w-0 让代码块能横向滚动 */}
+                  换行和 <p> 的 margin 叠出双倍空行）；min-w-0 让代码块能横向滚动。
+                  思考折叠段与「思考中」占位都在气泡内部（对齐主窗口的 turn 布局） */}
               <div className="max-w-[92%] min-w-0 break-words rounded-md rounded-bl-sm border border-border px-2.5 py-1.5 text-[12px] leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-                <Markdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-                  {m.text}
-                </Markdown>
+                {(m.thinking ?? "").length > 0 && (
+                  <FloatThinkingBlock
+                    text={m.thinking ?? ""}
+                    live={m.live === true && m.thinkingDone !== true}
+                  />
+                )}
+                {m.text.length > 0 ? (
+                  <Markdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                    {m.text}
+                  </Markdown>
+                ) : (
+                  m.live === true && (
+                    <span className="text-[11px] text-muted-foreground">💭 思考中…</span>
+                  )
+                )}
               </div>
-              <CopyButton copied={copiedId === m.id} onClick={() => void copy(m)} />
+              {m.text.length > 0 && <CopyButton copied={copiedId === m.id} onClick={() => void copy(m)} />}
             </div>
           );
         })}
       </div>
     </div>
+  );
+}
+
+/**
+ * 思考过程折叠段（渲染在 assistant 气泡内部，交互对齐 hermes TUI 的
+ * Thinking 面板）：
+ *  - live（本轮思考阶段流式中）：自动展开，灰字跟随滚动；正文 / 工具接棒
+ *    （thinkingDone）或本轮结束（live 翻转）后自动收起只留一行摘要；
+ *  - 收起态摘要行带 ▸/▾ chevron + 思考正文首行预览（compactPreview 风格），
+ *    提示「可以点开看思考了什么」；点击任意位置开合；
+ *  - 340px 小窗下高度封顶 40，超出内部滚动，不撑爆弹窗。
+ * 用受控 details + preventDefault 手动翻转，是因为要随 live 自动开合——
+ * 非受控 <details> 的展开状态吃不到 props 更新。
+ */
+function FloatThinkingBlock({ text, live }: { text: string; live: boolean }): React.ReactElement {
+  const [open, setOpen] = useState(live);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => setOpen(live), [live]);
+
+  // 收起态的标题预览：思考正文第一个非空行，截到 48 字符（compactPreview 风格）
+  const preview = useMemo(() => {
+    const first = text.split("\n").find((l) => l.trim().length > 0) ?? "";
+    return first.length > 48 ? `${first.slice(0, 48)}…` : first;
+  }, [text]);
+
+  // 展开且流式中：跟随滚动贴底，模仿终端「尾巴一直在视野里」的阅读体验
+  useEffect(() => {
+    if (!(open && live)) return;
+    const el = bodyRef.current;
+    if (el !== null) el.scrollTop = el.scrollHeight;
+  }, [text, open, live]);
+
+  return (
+    <details open={open}>
+      <summary
+        title={open ? "收起思考过程" : "展开看思考了什么"}
+        onClick={(ev) => {
+          ev.preventDefault();
+          setOpen((v) => !v);
+        }}
+        className={
+          live
+            ? "flex cursor-pointer select-none items-center gap-1 text-[10px] text-foreground"
+            : "flex cursor-pointer select-none items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground"
+        }
+      >
+        <span className="w-2 shrink-0 text-center">{open ? "▾" : "▸"}</span>
+        <span className={live ? "animate-pulse" : undefined}>💭</span>
+        <span className="shrink-0">{live ? "思考中…" : "思考过程"}</span>
+        {!open && preview.length > 0 && (
+          <span className="truncate opacity-60">{preview}</span>
+        )}
+      </summary>
+      {open && (
+        <div
+          ref={bodyRef}
+          className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-border/60 bg-muted/30 px-2 py-1.5 text-[11px] leading-relaxed text-muted-foreground"
+        >
+          {text}
+        </div>
+      )}
+    </details>
   );
 }
 

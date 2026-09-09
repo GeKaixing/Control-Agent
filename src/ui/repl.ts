@@ -13,10 +13,11 @@
  */
 
 import type { Agent } from "../agent/agent.js";
-import { listSessions, totalUsage } from "../context/index.js";
+import { deleteSession, listSessions, totalUsage } from "../context/index.js";
 import type { AgentState, MessageQueue } from "../context/index.js";
 import type { ModelRef } from "../types.js";
 import type { StreamFn } from "../providers/types.js";
+import { setAskUserHandler, type AskUserFn, type AskUserRequest } from "../tools/ask-user.js";
 import type { Tool } from "../tools/types.js";
 import type { LoopInput } from "./input.js";
 
@@ -53,6 +54,56 @@ export interface ReplOptions {
   steeringPollMs?: number;
 }
 
+// -------------------------------------------------------------- ask_user 通道
+
+/**
+ * ask_user 工具的 REPL 实现：把问题渲染到 output，借 `LoopInput.ask()` 等
+ * 下一行输入作为答案。
+ *
+ * 为什么能安全借用 ask()：REPL 主循环在 `agent.run()` 期间不持有 ask() 的
+ * waiter，而 ask_user 执行时主循环必然停在 `await agent.run()` 上——
+ * InputController 单 waiter 语义下不会打架。用户此时敲的行进答案通道
+ * 而不是 steering，这正是提问期间的预期行为。
+ *
+ * 数字快捷回答：用户输入的纯数字若落在选项序号范围内，映射成选项原文
+ * 回给模型（模型不需要再猜「2 是什么意思」）。
+ * 中断语义：agent abort / EOF → 返回 null，工具侧据此 fail。
+ */
+export function createReplAskUser(io: { input: LoopInput; output: (text: string) => void }): AskUserFn {
+  return async (req: AskUserRequest, ctx): Promise<string | null> => {
+    let text = `\n[模型提问] ${req.question}\n`;
+    if (req.choices !== undefined && req.choices.length > 0) {
+      req.choices.forEach((c, i) => {
+        text += `  ${i + 1}. ${c}\n`;
+      });
+      text += "（输入序号或直接回答，回车提交）\n";
+    }
+    io.output(text);
+
+    const line = await new Promise<string | null>((resolve) => {
+      if (ctx.signal.aborted) {
+        resolve(null);
+        return;
+      }
+      const onAbort = (): void => resolve(null);
+      ctx.signal.addEventListener("abort", onAbort, { once: true });
+      io.input.ask("› ").then((answer) => {
+        ctx.signal.removeEventListener("abort", onAbort);
+        resolve(answer);
+      });
+    });
+
+    if (line === null) return null;
+    const trimmed = line.trim();
+    if (/^\d+$/.test(trimmed) && req.choices !== undefined) {
+      const idx = Number(trimmed) - 1;
+      const picked = req.choices[idx];
+      if (picked !== undefined) return picked;
+    }
+    return trimmed;
+  };
+}
+
 // -------------------------------------------------------------- 主循环
 
 /**
@@ -69,6 +120,9 @@ export interface ReplOptions {
  */
 export async function runRepl(opts: ReplOptions): Promise<number> {
   const pollMs = opts.steeringPollMs ?? 120;
+
+  // ask_user 通道：REPL 有交互终端，注入实现；退出时撤下（防止悬挂引用）
+  setAskUserHandler(createReplAskUser({ input: opts.input, output: opts.output }));
 
   // pumping steering：原 src/index.ts 用一个 setInterval 120ms 间隔 drain
   const pump = setInterval(() => {
@@ -192,7 +246,47 @@ async function handleSlashCommand(
     }
 
     case "sessions": {
-      // 会话持久化清单（v1 只读：恢复走 CLI 的 --resume [id]）
+      // 子命令：/sessions 列清单；/sessions rm <id> 删除（id 支持前缀唯一匹配）
+      const sub = argument.split(/\s+/)[0]?.toLowerCase() ?? "";
+      if (sub === "rm" || sub === "del" || sub === "delete") {
+        const target = argument.slice(sub.length).trim();
+        if (target.length === 0) {
+          opts.output("  用法：/sessions rm <id>（id 可只写前缀，/sessions 查看清单）\n");
+          return { exit: false, code: 0 };
+        }
+        // 当前会话正在被自动保存：删了下轮也会重建，直接拒绝并说明
+        if (target === opts.state.sessionId) {
+          opts.output("  拒绝删除：这是当前正在使用的会话（每轮结束自动保存，删了也会重建）。\n");
+          return { exit: false, code: 0 };
+        }
+        const sessions = await listSessions(opts.state.cwd);
+        const matches = sessions.filter((s) => s.id.startsWith(target));
+        if (matches.length === 0) {
+          opts.output(`  没有匹配的会话：${target}\n`);
+          return { exit: false, code: 0 };
+        }
+        if (matches.length > 1) {
+          opts.output(`  前缀不唯一（${matches.length} 个匹配），请写更长的 id：\n`);
+          for (const s of matches) opts.output(`  ${s.id}\n`);
+          return { exit: false, code: 0 };
+        }
+        const victim = matches[0];
+        if (victim === undefined) return { exit: false, code: 0 };
+        if (victim.id === opts.state.sessionId) {
+          opts.output("  拒绝删除：这是当前正在使用的会话（每轮结束自动保存，删了也会重建）。\n");
+          return { exit: false, code: 0 };
+        }
+        const when = new Date(victim.savedAt).toLocaleString("zh-CN", { hour12: false });
+        const okDel = await deleteSession(opts.state.cwd, victim.id);
+        opts.output(
+          okDel
+            ? `  已删除会话 ${victim.id}（${when}，${victim.nodeCount} 节点）\n`
+            : `  删除失败：${victim.id}（文件不存在或无法删除）\n`,
+        );
+        return { exit: false, code: 0 };
+      }
+
+      // 会话持久化清单（恢复走 CLI 的 --resume [id]）
       const sessions = await listSessions(opts.state.cwd);
       if (sessions.length === 0) {
         opts.output("  （还没有已持久化的会话；交互模式每轮结束自动保存）\n");

@@ -18,7 +18,8 @@ import { EndpointModelMenu } from "./EndpointModelMenu";
 import { ToolsPanel } from "./ToolsPanel";
 import { ContextBar, ContextUsageBar } from "./ContextBar";
 import { SessionPicker } from "./SessionPicker";
-import { SettingsButton } from "./SettingsPopover";
+import { SettingsButton, COMPOSER_HINTS_KEY, readComposerHints } from "./SettingsPopover";
+import { LocalServicesButton } from "./LocalServicesPopover";
 import type { Attachment } from "../../../shared/api";
 
 interface Props {
@@ -57,7 +58,7 @@ interface MentionState {
  *  - 附件上传：拖拽 / 粘贴 / 点 Paperclip → 文件选择器（v1 仅 image）
  *  - @ 文件引用：输入 @" 弹候选 popover，键盘选择
  *  - IME 守卫：中文拼音 composition 期间不抢 Enter
- *  - 快捷键提示 footer
+ *  - 快捷键提示 footer（设置 → 输入提示行 可关闭，localStorage 持久化 + storage 事件跨窗口同步）
  */
 export function Composer({
   status,
@@ -93,7 +94,16 @@ export function Composer({
 
   const info = useSessionStore((s) => s.info);
   const usage = useSessionStore((s) => s.usage);
-  const mode = useSessionStore((s) => s.info?.mode ?? "full");
+  // 输入提示行（快捷键 + 字数 footer）显隐：localStorage 偏好，设置弹层里切换。
+  // 弹层是独立子窗口，改 localStorage 后主窗口靠 storage 事件同步，无需主进程中转。
+  const [hintsVisible, setHintsVisible] = useState<boolean>(() => readComposerHints());
+  useEffect(() => {
+    const onStorage = (e: StorageEvent): void => {
+      if (e.key === COMPOSER_HINTS_KEY) setHintsVisible(readComposerHints());
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);  const mode = useSessionStore((s) => s.info?.mode ?? "full");
   const paused = useSessionStore((s) => s.info?.paused ?? false);
   const togglePaused = useSessionStore((s) => s.setPaused);
   /** macOS 听写状态（null = 从未开始过） */
@@ -541,6 +551,11 @@ export function Composer({
                 <ContextBar />
                 <ContextUsageBar usage={usage} contextWindow={info?.contextWindow ?? 128000} />
                 <CopyPromptButton text={lastUserPrompt} />
+                {/* 本地服务入口（设置开关开启时可见，角标为检测到的服务数） */}
+                <LocalServicesButton
+                  enabled={info?.localPreview ?? false}
+                  count={info?.localServers.length ?? 0}
+                />
                 {/* 设置弹层（齿轮）：审批模式 / 自动压缩等开关 */}
                 <SettingsButton />
               </>
@@ -609,16 +624,18 @@ export function Composer({
           </div>
         </div>
 
-        {/* 快捷键提示 footer */}
-        <div className="flex items-center gap-3 border-t border-border px-3.5 py-1 text-[10px] text-muted-foreground">
-          <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap">
-            <CornerDownLeft className="h-2.5 w-2.5" /> 发送
-          </span>
-          <span className="shrink-0 whitespace-nowrap">Shift+Enter 换行</span>
-          <span className="shrink-0 whitespace-nowrap">↑↓ 历史</span>
-          <span className="shrink-0 whitespace-nowrap">@ 文件</span>
-          <span className="ml-auto shrink-0 whitespace-nowrap">{text.length} 字 · {attachments.length} 附件</span>
-        </div>
+        {/* 快捷键提示 footer（设置 → 输入提示行 可关闭） */}
+        {hintsVisible && (
+          <div className="flex items-center gap-3 border-t border-border px-3.5 py-1 text-[10px] text-muted-foreground">
+            <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap">
+              <CornerDownLeft className="h-2.5 w-2.5" /> 发送
+            </span>
+            <span className="shrink-0 whitespace-nowrap">Shift+Enter 换行</span>
+            <span className="shrink-0 whitespace-nowrap">↑↓ 历史</span>
+            <span className="shrink-0 whitespace-nowrap">@ 文件</span>
+            <span className="ml-auto shrink-0 whitespace-nowrap">{text.length} 字 · {attachments.length} 附件</span>
+          </div>
+        )}
       </div>
 
       {/* 隐藏的 file picker */}
@@ -700,7 +717,7 @@ function MicButton({
     const t = setTimeout(() => setHint(false), 6000);
     return () => clearTimeout(t);
   }, [errorMessage]);
-  const title = errorMessage !== null ? `听写出错：${errorMessage}` : dictating ? "停止听写" : "语音输入（macOS 听写）";
+  const title = errorMessage !== null ? `听写出错：${errorMessage}` : dictating ? "停止听写" : "语音输入听写";
   return (
     <span className="relative inline-flex">
       <button

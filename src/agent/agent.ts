@@ -33,6 +33,7 @@ import {
   type TransformOptions,
 } from "../context/index.js";
 import { convertToLlm } from "./convert.js";
+import { log } from "../log/index.js";
 
 export type AgentEvent =
   | { type: "agent_start" }
@@ -317,6 +318,10 @@ export class Agent {
   async run(): Promise<void> {
     if (this.running) throw new Error("代理正在运行中，请勿重复调用 run()");
     this.running = true;
+    log.debug(
+      "agent",
+      `run 开始 model=${this.state.model.provider}:${this.state.model.id} thinking=${this.currentThinkingLevel}`,
+    );
     this.toolRounds = 0;
     this.failureCounts.clear();
     this.autoCompactBlocked = false;
@@ -340,6 +345,7 @@ export class Agent {
       }
     } finally {
       this.running = false;
+      log.debug("agent", `run 结束 toolRounds=${this.toolRounds}`);
       await this.emit({ type: "agent_end", toolRounds: this.toolRounds });
       // 会话持久化：agent_end 之后落盘（emit 先行，UI 不用等磁盘）。
       // 失败只 notice 不抛——持久化是增强，不能让对话本身跟着失败。
@@ -347,6 +353,7 @@ export class Agent {
         try {
           await saveSession(this.state, this.state.cwd);
         } catch (err) {
+          log.error("agent", `会话持久化失败 session=${this.state.sessionId ?? "?"}`, err);
           await this.emit({
             type: "notice",
             message: `会话持久化失败：${err instanceof Error ? err.message : String(err)}`,
@@ -525,10 +532,23 @@ export class Agent {
           else if (event.type === "error") {
             final = event.error;
             retryable = event.reason !== "aborted";
+            if (event.reason === "error") {
+              // provider 内部把 HTTP 状态 / 响应体摘要把进了 errorMessage，
+              // 这里原样落盘——终端上它可能只显示一行，日志里有全量。
+              log.error(
+                "agent",
+                `模型返回错误 model=${this.state.model.provider}:${this.state.model.id}（第 ${attempt + 1} 次尝试）：${final.errorMessage ?? "未知原因"}`,
+              );
+            }
           }
         }
       } catch (err) {
         const aborted = this.controller.signal.aborted;
+        log.error(
+          "agent",
+          `模型调用异常 model=${this.state.model.provider}:${this.state.model.id}（第 ${attempt + 1} 次尝试）${aborted ? "（已中断）" : ""}`,
+          err,
+        );
         final = {
           role: "assistant",
           content: [],
@@ -551,6 +571,10 @@ export class Agent {
       if (this.controller.signal.aborted) break;
 
       const delayMs = STREAM_RETRY_BASE_MS * 2 ** attempt;
+      log.info(
+        "agent",
+        `流失败自动重试 attempt=${attempt + 1}/${this.maxStreamRetries} delay=${delayMs}ms`,
+      );
       await this.emit({
         type: "notice",
         message: `模型流失败（${final?.errorMessage ?? "未知原因"}），${delayMs}ms 后自动重试（第 ${attempt + 1}/${this.maxStreamRetries} 次）`,
@@ -627,9 +651,20 @@ export class Agent {
               signal: this.controller.signal,
             });
           } catch (err) {
+            log.error("agent", `工具 ${call.name} 执行抛异常`, err);
             result = fail(`工具 ${call.name} 执行异常：${String(err)}`);
           }
         }
+      }
+
+      if (result.isError) {
+        // 工具自己报的失败（不抛异常）也要留痕：模型可能自己消化掉，
+        // 用户在终端上根本看不到这条——日志是唯一可靠的痕迹。
+        const text = result.content
+          .filter((c): c is { type: "text"; text: string } => c.type === "text")
+          .map((c) => c.text)
+          .join(" ");
+        log.warn("agent", `工具 ${call.name} 返回错误（${Date.now() - startedAt}ms）：${text.slice(0, 300)}`);
       }
 
       await this.emit({
@@ -695,6 +730,7 @@ export class Agent {
     try {
       return await this.approvalGate({ toolName, arguments: args });
     } catch (err) {
+      log.error("agent", `审批门异常 tool=${toolName}，已按拒绝处理`, err);
       await this.emit({
         type: "notice",
         message: `审批门异常，已按拒绝处理：${String(err)}`,
@@ -815,8 +851,10 @@ export class Agent {
     // （这样 SessionManager 才能在 stream 事件之间插入 pause gate）。
     try {
       await this.onEvent(event);
-    } catch {
-      // swallow：观察者错误不应污染代理主流程
+    } catch (err) {
+      // 观察者错误不影响主流程，但要留痕——「渲染器炸了导致黑屏」这类问题
+      // 没有日志就只能靠猜。
+      log.debug("agent", "onEvent 观察者异常（不影响主流程）", err);
     }
   }
 }

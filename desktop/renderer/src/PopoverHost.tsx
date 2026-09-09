@@ -5,6 +5,7 @@ import { CustomModelContent } from "./components/CustomModelPopover";
 import { ReasoningContent, UsageContent } from "./components/ContextBar";
 import { ModeToggleContent } from "./components/ModeToggle";
 import { SettingsContent } from "./components/SettingsPopover";
+import { LocalServicesContent } from "./components/LocalServicesPopover";
 import { SessionPickerContent } from "./components/SessionPicker";
 import type { InfoPayload, UsagePayload } from "../../shared/api";
 
@@ -70,7 +71,8 @@ export function PopoverHost({ id }: { id: string }): React.ReactElement {
       id !== "mode" &&
       id !== "sessions" &&
       id !== "custom-model" &&
-      id !== "settings"
+      id !== "settings" &&
+      id !== "local-services"
     )
       close();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -135,8 +137,21 @@ export function PopoverHost({ id }: { id: string }): React.ReactElement {
               // 创建/销毁窗口在主进程；refresh-info 广播后回显开关
               void window.api.setMsgWindow(on);
             }}
+            localPreview={info.localPreview}
+            onLocalPreviewChange={(on) => {
+              // 只落偏好；refresh-info 广播后回显开关
+              void window.api.setLocalPreview(on);
+            }}
+            alwaysOnTop={info.alwaysOnTop}
+            onAlwaysOnTopChange={(on) => {
+              // 窗口置顶在主进程；refresh-info 广播后回显开关
+              void window.api.setAlwaysOnTop(on);
+            }}
           />
         );
+        break;
+      case "local-services":
+        content = <LocalServicesContent />;
         break;
       case "sessions":
         content = <SessionPickerContent onClose={close} />;

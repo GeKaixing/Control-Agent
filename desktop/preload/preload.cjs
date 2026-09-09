@@ -14,6 +14,7 @@ const CH = {
   SUBMIT: "desktop:submit",
   STEER: "desktop:steer",
   ABORT: "desktop:abort",
+  ANSWER_ASK: "desktop:answerAsk",
   SET_MODEL: "desktop:setModel",
   SET_CUSTOM_MODEL: "desktop:setCustomModel",
   SET_MODE: "desktop:setMode",
@@ -23,6 +24,8 @@ const CH = {
   SET_APPROVAL_MODE: "desktop:setApprovalMode",
   SET_AUTO_COMPACT: "desktop:setAutoCompact",
   SET_MSG_WINDOW: "desktop:setMsgWindow",
+  SET_LOCAL_PREVIEW: "desktop:setLocalPreview",
+  SET_ALWAYS_ON_TOP: "desktop:setAlwaysOnTop",
   PAUSE: "desktop:pause",
   RESUME: "desktop:resume",
   GET_USAGE: "desktop:getUsage",
@@ -40,6 +43,8 @@ const CH = {
   SWITCH_SESSION: "desktop:switchSession",
   SWITCH_TO: "desktop:switchTo",
   LIST_SESSIONS: "desktop:listSessions",
+  LIST_PERSISTED_SESSIONS: "desktop:listPersistedSessions",
+  DELETE_SESSION: "desktop:deleteSession",
   PUSH: "desktop:push",
 };
 
@@ -55,6 +60,9 @@ const api = {
   },
   abort() {
     return ipcRenderer.invoke(CH.ABORT);
+  },
+  answerAsk(id, answer) {
+    return ipcRenderer.invoke(CH.ANSWER_ASK, id, answer);
   },
   setModel(spec) {
     return ipcRenderer.invoke(CH.SET_MODEL, spec);
@@ -82,6 +90,12 @@ const api = {
   },
   setMsgWindow(on) {
     return ipcRenderer.invoke(CH.SET_MSG_WINDOW, on === true);
+  },
+  setLocalPreview(on) {
+    return ipcRenderer.invoke(CH.SET_LOCAL_PREVIEW, on === true);
+  },
+  setAlwaysOnTop(on) {
+    return ipcRenderer.invoke(CH.SET_ALWAYS_ON_TOP, on === true);
   },
   pause() {
     return ipcRenderer.invoke(CH.PAUSE);
@@ -133,6 +147,12 @@ const api = {
   },
   listSessions() {
     return ipcRenderer.invoke(CH.LIST_SESSIONS);
+  },
+  listPersistedSessions() {
+    return ipcRenderer.invoke(CH.LIST_PERSISTED_SESSIONS);
+  },
+  deleteSession(id) {
+    return ipcRenderer.invoke(CH.DELETE_SESSION, id);
   },
   info() {
     return ipcRenderer.invoke(CH.INFO);

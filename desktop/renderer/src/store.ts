@@ -41,6 +41,17 @@ export interface Turn {
 export type Status = "idle" | "running" | "error" | "plan_pending";
 
 /**
+ * 模型经 ask_user 工具发出的待回答提问。回答/中断后主进程广播
+ * ask_user_done，这里按 id 撤下。切会话 / reset 不清空——提问挂在
+ * 还在跑的 agent 上，切回来还要能答。
+ */
+export interface PendingAsk {
+  id: string;
+  question: string;
+  choices?: string[];
+}
+
+/**
  * macOS 听写的渲染层状态。seq 用于让 Composer 区分「新事件」
  * （partial 高频到达，靠引用比较不可靠）。
  */
@@ -66,6 +77,8 @@ interface State {
   sessionTitle: string | null;
   /** 会话代数：newSession / 切会话时自增，Composer 靠它清空输入历史 */
   sessionSeq: number;
+  /** 模型提问（ask_user 工具）待回答清单；有值时问答卡渲染在 Composer 上方 */
+  pendingAsks: PendingAsk[];
 }
 
 interface Actions {
@@ -92,6 +105,8 @@ interface Actions {
   applyRemoteSwitch(): Promise<void>;
   /** 新会话（当前会话归档，可 ← 切回）；notice 显示「新会话 N/M」。 */
   newSession(): Promise<void>;
+  /** 回答模型的 ask_user 提问；answer 空串 = 跳过（主进程视为中断）。 */
+  answerAsk(id: string, answer: string): Promise<void>;
 }
 
 let turnCounter = 0;
@@ -130,6 +145,7 @@ export const useSessionStore = create<State & Actions>((set, get) => ({
   dictation: null,
   sessionTitle: null,
   sessionSeq: 0,
+  pendingAsks: [],
 
   setInfo: (info) => set({ info }),
 
@@ -237,6 +253,11 @@ export const useSessionStore = create<State & Actions>((set, get) => ({
     }
   },
 
+  answerAsk: async (id, answer) => {
+    await window.api.answerAsk(id, answer);
+    // 不在这里本地撤卡——主进程广播 ask_user_done，多端统一靠事件流收尾
+  },
+
   handleEvent: (e) =>
     set((s) => {
       switch (e.t) {
@@ -337,6 +358,21 @@ export const useSessionStore = create<State & Actions>((set, get) => ({
           return { notice: `[等待审批] ${e.toolName}（到主窗口弹窗里放行）` };
         case "approval_done":
           return { notice: e.allow ? `[审批] 已允许` : `[审批] 已拒绝` };
+        case "ask_user":
+          // 模型提问：追加待答卡（Composer 上方渲染）。有选项时展示按钮，仍可自由输入。
+          return {
+            pendingAsks: [
+              ...s.pendingAsks,
+              {
+                id: e.id,
+                question: e.question,
+                ...(e.choices !== undefined ? { choices: e.choices } : {}),
+              },
+            ],
+          };
+        case "ask_user_done":
+          // 收尾广播：本地 / msg-window / remote 等所有显示端统一按 id 撤卡
+          return { pendingAsks: s.pendingAsks.filter((p) => p.id !== e.id) };
         case "end":
           return { status: "idle", turns: markLastAssistantNotLive(s.turns) };
         case "error":

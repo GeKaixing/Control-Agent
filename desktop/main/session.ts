@@ -23,6 +23,9 @@ import {
   maxContextTokensFor,
   modelSpecString,
   totalUsage,
+  // 与本类方法名区分：磁盘读写走别名，避免 listSessions 方法名遮蔽
+  deleteSession as deleteSessionOnDisk,
+  listSessions as listSessionsOnDisk,
   type StoredCustomModel,
 } from "../../src/context/index.js";
 import type { DisplayEvent } from "../../src/connector/core/types.js";
@@ -42,9 +45,11 @@ import {
 import type { AgentState } from "../../src/context/state.js";
 import { resolveModel } from "../../src/providers/index.js";
 import { BASE_URL_PRESETS } from "../../src/providers/vendors.js";
-import { allTools } from "../../src/tools/index.js";
+import { allTools, setAskUserHandler, type AskUserRequest } from "../../src/tools/index.js";
+import type { ToolContext } from "../../src/tools/types.js";
 import { walkFiles } from "../../src/tools/fs-utils.js";
 import { buildApprovalDetail } from "./approval-diff.js";
+import { extractLocalServers, mergeLocalServers } from "./local-services.js";
 import type {
   InfoPayload,
   UsagePayload,
@@ -52,17 +57,20 @@ import type {
   ListFilesResult,
   ListModelsResult,
   ModelInfo,
+  PersistedSessionInfo,
+  DeleteSessionResult,
   RunMode,
   ReasoningLevel,
   EndpointId,
   ToolsByCategory,
   ToolEntry,
   Attachment,
+  LocalServerInfo,
   ContextBreakdown,
   CustomModelParams,
 } from "../shared/api.js";
 import { REASONING_MAX_TOKENS } from "../shared/api.js";
-import type { ThinkingLevel, ModelRef } from "../../src/types.js";
+import type { ThinkingLevel, ModelRef, TextContent } from "../../src/types.js";
 
 // SessionManager 内部使用 SessionMode（来自 src/session.ts），对外暴露 RunMode
 // （来自 shared/api.ts，渲染层依赖）。两边字段值相同，没必要再开一遍。
@@ -464,6 +472,12 @@ export class SessionManager {
   /** 审批请求自增序号（WireEvent id 用） */
   private approvalSeq = 0;
 
+  // ────────────── ask_user：模型 → 用户提问通道 ──────────────
+  /** 提问请求自增序号（WireEvent id 用） */
+  private askSeq = 0;
+  /** 等用户回答的提问：id → resolve。answerAsk / abort 时唤醒。 */
+  private readonly pendingAsks = new Map<string, (answer: string | null) => void>();
+
   // ────────────── Context：自动压缩开关 ──────────────
   /** 自动 compact 开关（设置弹窗）；传给每次新建的 Agent，setter 同时打到当前 Agent */
   private autoCompact = true;
@@ -474,6 +488,20 @@ export class SessionManager {
    * index.ts 的 IPC handler 里做（SessionManager 不碰 BrowserWindow）。
    */
   private msgWindow = false;
+
+  // ────────────── 窗口置顶 ──────────────
+  /** 「窗口置顶」开关（设置弹窗）：默认不开启。只存偏好——setAlwaysOnTop 的实际
+   * 调用在 index.ts 的 IPC handler 里做（SessionManager 不碰 BrowserWindow）。 */
+  private alwaysOnTop = false;
+
+  // ────────────── agent 本地服务预览 ──────────────
+  /** 「agent 开启的本地服务预览」开关（设置弹窗）：默认不开启，只控制 UI 入口可见性。 */
+  private localPreview = false;
+  /**
+   * 检测到的 agent 本地服务：bash 工具输出里出现 localhost 地址时记录。
+   * 无论开关开与否都照常收集（开关只管 UI 展示），随 info() 下发。
+   */
+  private localServers: LocalServerInfo[] = [];
 
   // ────────────── 多会话（← → 切换） ──────────────
   /**
@@ -527,6 +555,10 @@ export class SessionManager {
         ? { persistCustomModel: deps.persistCustomModel }
         : {}),
     };
+
+    // ask_user 通道：handler 是 src/tools/ask-user.ts 的模块级单例。桌面端全程
+    // 只有一个 SessionManager 实例，构造时注入一次即可（所有新建 Agent 共享）。
+    setAskUserHandler((req, ctx) => this.askUser(req, ctx));
   }
 
   get isRunning(): boolean {
@@ -577,6 +609,9 @@ export class SessionManager {
       approvalMode: this.approvalMode,
       autoCompact: this.autoCompact,
       msgWindow: this.msgWindow,
+      localPreview: this.localPreview,
+      alwaysOnTop: this.alwaysOnTop,
+      localServers: this.localServers.map((s) => ({ ...s })),
       sessionTitle: this.sessionTitles[this.sessionIdx] ?? "新会话",
       lastUserPrompt: this.lastUserPrompt(),
       toolsByCategory: listToolsByCategory(this.state),
@@ -651,6 +686,42 @@ export class SessionManager {
       total: this.sessions.length,
       titles: this.sessionTitles.slice(),
     };
+  }
+
+  /**
+   * 「活着的」会话 id 集合：本窗口所有标签页已落盘的 sessionId。
+   * 这些文件每轮 agent_end 都会被自动保存覆盖——删了也会立刻重建，
+   * 历史清单里要标 locked 并拒绝删除。
+   */
+  private liveSessionIds(): Set<string> {
+    const out = new Set<string>();
+    for (const s of this.sessions) {
+      if (typeof s.sessionId === "string") out.add(s.sessionId);
+    }
+    return out;
+  }
+
+  /**
+   * 磁盘上的持久化会话清单（.c-agent/sessions/，新的在前）。与内存标签页
+   * （listSessions）是两个集合：这里含 CLI 与之前退出时落盘的会话。
+   * 使用中（任一标签页占用）的条目标 locked，UI 禁删。
+   */
+  async listPersistedSessions(): Promise<PersistedSessionInfo[]> {
+    const live = this.liveSessionIds();
+    const list = await listSessionsOnDisk(this.deps.cwd());
+    return list.map((s) => ({ id: s.id, savedAt: s.savedAt, nodeCount: s.nodeCount, locked: live.has(s.id) }));
+  }
+
+  /**
+   * 删除一条持久化会话文件。使用中的会话拒绝（自动保存会重建，删了是假动作）；
+   * 其余交给内核 deleteSession（id 字符集校验堵路径穿越，坏输入 ok:false 不抛错）。
+   */
+  async deletePersistedSession(id: string): Promise<DeleteSessionResult> {
+    if (this.liveSessionIds().has(id)) {
+      return { ok: false, error: "该会话正在使用中（自动保存会重建文件），请先关闭对应标签页" };
+    }
+    const ok = await deleteSessionOnDisk(this.deps.cwd(), id);
+    return ok ? { ok: true } : { ok: false, error: "会话不存在或无法删除" };
   }
 
   /** 模型选择落盘（deps.persistModel 注入，缺省 noop）。spec 从 resolved.model 现算，最真实。 */
@@ -765,6 +836,16 @@ export class SessionManager {
     this.msgWindow = on;
   }
 
+  /** agent 本地服务预览开关（设置弹窗，默认关闭）。只控制 UI 入口可见性。 */
+  setLocalPreview(on: boolean): void {
+    this.localPreview = on;
+  }
+
+  /** 窗口置顶开关（设置弹窗，默认关闭）。窗口的实际置顶在 index.ts 的 handler 里做。 */
+  setAlwaysOnTop(on: boolean): void {
+    this.alwaysOnTop = on;
+  }
+
   /**
    * Permission 支柱：Agent.approvalGate 的实现。
    * approvalMode 关闭 / 用户选过「本会话全部允许」→ 直接放行；
@@ -798,6 +879,52 @@ export class SessionManager {
       message: `[审批] ${allow ? "✓ 允许" : "✗ 拒绝"} ${req.toolName}${verdict === "always" ? "（本会话后续不再询问）" : ""}`,
     });
     return allow;
+  }
+
+  // ────────────── ask_user：模型 → 用户提问通道 ──────────────
+
+  /**
+   * ask_user 工具的后端（src/tools/ask-user.ts 模块级 handler，构造器注入）。
+   * 广播 ask_user 事件让所有显示端弹问答卡，挂起等 answerAsk RPC 唤醒；
+   * agent 被 abort 时借 ctx.signal 立刻以 null 收场（工具侧转 fail「提问被中断」）。
+   * 返回 null = 没有得到回答；非空 = 用户答案原文。
+   */
+  private async askUser(req: AskUserRequest, ctx: ToolContext): Promise<string | null> {
+    const id = `ask_${++this.askSeq}`;
+    const done = new Promise<string | null>((resolve) => {
+      this.pendingAsks.set(id, resolve);
+    });
+    const onAbort = (): void => this.resolveAsk(id, null);
+    if (ctx.signal.aborted) onAbort();
+    else ctx.signal.addEventListener("abort", onAbort, { once: true });
+    this.deps.emit({
+      t: "ask_user",
+      id,
+      question: req.question,
+      ...(req.choices !== undefined ? { choices: req.choices } : {}),
+    });
+    const answer = await done;
+    ctx.signal.removeEventListener("abort", onAbort);
+    this.deps.emit(
+      answer === null
+        ? { t: "ask_user_done", id, aborted: true }
+        : { t: "ask_user_done", id, answer },
+    );
+    return answer;
+  }
+
+  /** 唤醒一次提问；重复 / 迟到 / 未知 id 直接忽略（问答卡是临时 UI，不报错）。 */
+  private resolveAsk(id: string, answer: string | null): void {
+    const resolve = this.pendingAsks.get(id);
+    if (resolve === undefined) return;
+    this.pendingAsks.delete(id);
+    resolve(answer);
+  }
+
+  /** 渲染层 / 独立 UI 提交的用户答案。空串 = 用户跳过（主进程视为中断）。 */
+  answerAsk(id: string, answer: string): void {
+    const trimmed = answer.trim();
+    this.resolveAsk(id, trimmed.length > 0 ? trimmed : null);
   }
 
   /** 切换推理强度。下一次新建的 Agent 才生效；同时刷新 maxTokens 与 thinkingLevel。 */
@@ -1350,10 +1477,16 @@ export class SessionManager {
         return;
       case "stream":
       case "tool_start":
-      case "tool_end":
       case "context_pruned":
       case "notice": {
         await this.pauseGate();
+        this.deps.emit(event);
+        return;
+      }
+      case "tool_end": {
+        await this.pauseGate();
+        // 本地服务检测：bash 输出里的 localhost 线索记进 localServers（见 local-services.ts）
+        this.trackLocalServers(event);
         this.deps.emit(event);
         return;
       }
@@ -1380,6 +1513,21 @@ export class SessionManager {
       default:
         return;
     }
+  }
+
+  /**
+   * agent 本地服务检测：bash 工具的输出里出现 localhost 地址 / 监听语句时记录。
+   * 无论预览开关开与否都收集（开关只管 UI 展示）；渲染层在 bash 的 tool_end /
+   * end 事件到达时重拉 info，无需主进程额外广播。
+   */
+  private trackLocalServers(event: Extract<AgentEvent, { type: "tool_end" }>): void {
+    if (event.toolCall.name !== "bash") return;
+    const text = event.result.content
+      .filter((c): c is TextContent => c.type === "text")
+      .map((c) => c.text)
+      .join("\n");
+    if (text.length === 0) return;
+    mergeLocalServers(this.localServers, extractLocalServers(text), Date.now());
   }
 }
 

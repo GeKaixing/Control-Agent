@@ -64,13 +64,47 @@ export type WireEvent =
    */
   | { t: "approval_request"; id: string; toolName: string; args: string }
   /** 审批结果广播（allow=true 已放行）。id 与 approval_request 对应。 */
-  | { t: "approval_done"; id: string; allow: boolean };
+  | { t: "approval_done"; id: string; allow: boolean }
+  /**
+   * ask_user 工具（模型 → 用户提问）：主进程收到模型提问后广播，显示端
+   * 渲染问答卡（选项按钮 + 自由输入）。答案经 answerAsk RPC 回主进程，
+   * 随后以 ask_user_done 广播收尾（所有显示端据此撤下问答卡）。
+   */
+  | { t: "ask_user"; id: string; question: string; choices?: string[] }
+  /** ask_user 收尾：answer 有值 = 用户已回答；aborted=true = 中断/跳过（无答案）。 */
+  | { t: "ask_user_done"; id: string; answer?: string; aborted?: boolean };
 
 /**
  * 菜单弹层子窗口请求：弹层渲染在独立无边框窗口里（浮在触发按钮下方），
  * 主窗口高度因此不变。x/y 是屏幕坐标（DIP，与 CSS px 同尺度），指向弹层左上角。
  */
-export type PopoverId = "tools" | "model" | "reasoning" | "usage" | "mode" | "sessions" | "custom-model" | "settings";
+export type PopoverId =
+  | "tools"
+  | "model"
+  | "reasoning"
+  | "usage"
+  | "mode"
+  | "sessions"
+  | "custom-model"
+  | "settings"
+  | "local-services";
+
+/**
+ * agent 启动的本地服务（从 bash 工具输出里检测到的 localhost 地址）。
+ * 单一事实来源在主进程 SessionManager，随 info() 下发给所有窗口。
+ */
+export interface LocalServerInfo {
+  /** 规范化后的可访问地址（0.0.0.0 统一改写成 localhost），如 "http://localhost:5173" */
+  url: string;
+  /** 检测时原始出现的主机名（localhost / 127.0.0.1 / 0.0.0.0 / ::1） */
+  host: string;
+  /** 端口号（1-65535，已过合法性校验） */
+  port: number;
+  /** 最近一次在 bash 输出里出现的时间戳（Date.now()） */
+  lastSeenAt: number;
+  /** 累计出现次数（同一服务被多次打印时递增，排序参考） */
+  hits: number;
+}
 
 export interface PopoverRequest {
   id: PopoverId;
@@ -202,6 +236,18 @@ export interface InfoPayload {
    * 主窗口关了仍保留）；窗口上的关闭按钮等价于把它关掉。
    */
   msgWindow: boolean;
+  /**
+   * agent 开启的本地服务预览开关（设置弹窗，默认不开启）。开启后状态栏出现
+   * 「本地服务」入口，弹窗列出检测到的服务并支持 iframe 内嵌预览。
+   */
+  localPreview: boolean;
+  /**
+   * 窗口置顶开关（设置弹窗，默认不开启）。开启后主窗口始终浮在所有窗口
+   * 之上（Windows / macOS 均为系统级 always-on-top）；偏好存 SessionManager。
+   */
+  alwaysOnTop: boolean;
+  /** 检测到的 agent 本地服务（按最近出现排序，最多 20 条）。开关关闭时主进程照常收集。 */
+  localServers: LocalServerInfo[];
   /** 当前会话的标题：取本会话第一条用户消息生成；还没有用户消息时是「新会话」。 */
   sessionTitle: string;
   /** 本会话最后一条用户消息原文；还没有用户消息时是 null。输入框 placeholder / 复制提示词用。 */
@@ -237,6 +283,27 @@ export interface ListSessionsResult {
   total: number;
   /** 各会话标题（与下标一一对应） */
   titles: string[];
+}
+
+/**
+ * 磁盘上的持久化会话（.c-agent/sessions/<id>.json）单条信息。
+ * 「历史会话」区数据源——与内存标签页（ListSessionsResult）是两个集合：
+ * 前者是落盘文件（含 CLI / 之前退出时写下的），后者是本窗口开着的标签页。
+ */
+export interface PersistedSessionInfo {
+  id: string;
+  /** 最近一次保存时间（Date.now()） */
+  savedAt: number;
+  /** 持久化的节点数（含 toolResult 与 compact 旧分支，大于「对话条数」） */
+  nodeCount: number;
+  /** true = 正被本窗口某个标签页使用：删除会在下轮自动保存时重建，UI 禁删 */
+  locked: boolean;
+}
+
+export interface DeleteSessionResult {
+  ok: boolean;
+  /** ok=false 时的失败原因（不存在 / 使用中 / 无法删除） */
+  error?: string;
 }
 
 export interface UsagePayload {
@@ -308,6 +375,11 @@ export interface DesktopApi {
   submit(text: string, attachments?: Attachment[]): Promise<SubmitResult>;
   steer(text: string): Promise<void>;
   abort(): Promise<void>;
+  /**
+   * 回答模型的 ask_user 提问。answer 为空串 = 用户跳过（主进程视为中断，
+   * 工具以 fail 收场）。id 与 ask_user 事件对应；迟到/未知 id 静默丢弃。
+   */
+  answerAsk(id: string, answer: string): Promise<void>;
   setModel(spec: string): Promise<SetModelResult>;
   /** 自定义模型：接口地址 + API KEY + 模型名称（OpenAI 兼容协议）。下一次新建的 Agent 生效。 */
   setCustomModel(params: CustomModelParams): Promise<SetModelResult>;
@@ -340,6 +412,16 @@ export interface DesktopApi {
   switchTo(index: number): Promise<SwitchSessionResult>;
   /** 会话清单：当前位置 + 总数 + 各会话标题（「选择会话」popover 用）。 */
   listSessions(): Promise<ListSessionsResult>;
+  /**
+   * 磁盘上的持久化会话清单（.c-agent/sessions/，新的在前；含 CLI 与
+   * 之前退出时落盘的会话）。「历史会话」区数据源。
+   */
+  listPersistedSessions(): Promise<PersistedSessionInfo[]>;
+  /**
+   * 删除一条持久化会话文件。使用中的标签页会话拒绝删除（自动保存会重建）；
+   * id 由主进程按字符集校验，坏输入返回 ok:false。
+   */
+  deleteSession(id: string): Promise<DeleteSessionResult>;
   /** 当前平台（darwin / win32 / linux）：StatusBar 按平台适配标题栏留位。 */
   readonly platform: "darwin" | "win32" | "linux";
   info(): Promise<InfoPayload>;
@@ -382,6 +464,16 @@ export interface DesktopApi {
    * 偏好由主进程回写，经 info 回显到设置弹层。
    */
   setMsgWindow(on: boolean): Promise<void>;
+  /**
+   * agent 本地服务预览开关：开启后状态栏显示「本地服务」入口（默认关闭）。
+   * 偏好由主进程回写，经 info 回显到设置弹层。
+   */
+  setLocalPreview(on: boolean): Promise<void>;
+  /**
+   * 窗口置顶开关：开启后主窗口始终浮在所有窗口之上（默认关闭）。
+   * 偏好由主进程回写，经 info 回显到设置弹层。
+   */
+  setAlwaysOnTop(on: boolean): Promise<void>;
   onEvent(cb: (e: WireEvent) => void): () => void;
 }
 

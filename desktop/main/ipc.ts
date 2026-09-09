@@ -12,6 +12,8 @@ export const IPC = {
   SUBMIT: "desktop:submit",
   STEER: "desktop:steer",
   ABORT: "desktop:abort",
+  /** ask_user 工具：渲染层提交用户对模型提问的回答 */
+  ANSWER_ASK: "desktop:answerAsk",
   SET_MODEL: "desktop:setModel",
   /** 「自定义模型」弹窗：接口地址 + API KEY + 模型名称（OpenAI 兼容） */
   SET_CUSTOM_MODEL: "desktop:setCustomModel",
@@ -25,6 +27,10 @@ export const IPC = {
   SET_AUTO_COMPACT: "desktop:setAutoCompact",
   /** 独立消息弹窗开关（默认不开启）：开启时主进程创建独立小窗实时显示回复流 */
   SET_MSG_WINDOW: "desktop:setMsgWindow",
+  /** agent 本地服务预览开关（默认不开启）：开启后状态栏显示「本地服务」入口 */
+  SET_LOCAL_PREVIEW: "desktop:setLocalPreview",
+  /** 窗口置顶开关（默认不开启）：开启后主窗口始终浮在所有窗口之上 */
+  SET_ALWAYS_ON_TOP: "desktop:setAlwaysOnTop",
   PAUSE: "desktop:pause",
   RESUME: "desktop:resume",
   GET_USAGE: "desktop:getUsage",
@@ -49,6 +55,9 @@ export const IPC = {
   /** 「选择会话」popover：跳转到指定下标的会话 / 拉会话清单（含标题） */
   SWITCH_TO: "desktop:switchTo",
   LIST_SESSIONS: "desktop:listSessions",
+  /** 「历史会话」：磁盘持久化会话清单 / 删除指定会话文件 */
+  LIST_PERSISTED_SESSIONS: "desktop:listPersistedSessions",
+  DELETE_SESSION: "desktop:deleteSession",
   /** 主进程 → 渲染进程：流式推送 WireEvent（由 desktop-display connector 产生） */
   PUSH: "desktop:push",
 } as const;

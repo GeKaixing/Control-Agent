@@ -1,4 +1,4 @@
-# tools/ —— 9 个内置工具
+# tools/ —— 10 个内置工具
 
 **关注点**：把模型能调用的「动作」都收口在这里。模型看到的是 `LlmTool[]`（带 JSON Schema
 签名），执行时拿到的是 `Tool.execute(args, ctx)` 的统一签名。每个工具都标 `isMutating`
@@ -22,6 +22,7 @@
 | `memory.ts` | ~? | 跨会话记忆：append（带时间戳追加到项目根 `MEMORY.md`）/ read（读回，保留尾部 8K）；注入端在 `session.ts` 的 `collectProjectMemory` |
 | `screenshot.ts` | ~110 | Computer Use 感知端：PowerShell + System.Drawing 截全虚拟屏 → JPEG dataUrl（Windows only，零 npm 依赖）；`isMutating: false` |
 | `computer.ts` | ~230 | Computer Use 执行端：鼠标点击/双击/右键、type（剪贴板粘贴）、hotkey（SendKeys 映射）、scroll；坐标取自 screenshot 图片，内部加虚拟屏偏移换算；Windows only；`isMutating: true` |
+| `ask-user.ts` | ~110 | 模型 → 用户的结构化提问通道：问题 + 可选选项，答案作为 toolResult 回灌。端点经 `setAskUserHandler()` 注入实现（REPL 借 `LoopInput.ask()` 抓下一行）；未注入时优雅 fail 并引导模型自行兜底；`isMutating: false` |
 
 ## `Tool` 接口
 
@@ -64,6 +65,27 @@ function fail(text: string): ToolResult;
 | `memory` | 跨会话记忆 | true | `action`(append/read), `content?` |
 | `screenshot` | 截屏（Computer Use 感知） | false | 无参数；返回 JPEG + 尺寸 + 虚拟屏原点 |
 | `computer` | 鼠标键盘（Computer Use 执行） | true | `action`(click/doubleClick/rightClick/type/hotkey/scroll), `x?`, `y?`, `content?`, `keys?`, `direction?`, `amount?` |
+| `ask_user` | 向用户提问并等答案 | false | `question`, `choices?`（2-4 个候选，用户仍可自由输入） |
+
+### ask_user 通道注入约定
+
+- **通道是端点能力**：工具本体只管请求/回灌形状；谁来回答由运行端在启动时
+  `setAskUserHandler(fn)` 注入，退出/销毁时传 `undefined` 撤下。
+  - REPL：`src/ui/repl.ts` 的 `createReplAskUser`——问题渲染到 output，借
+    `LoopInput.ask()` 等下一行（agent 运行期间主循环不占 ask() 的 waiter，
+    不会打架）；纯数字输入落在选项序号范围内会映射成选项原文。
+  - print / 无人值守：不注入 → 工具 fail，提示语引导模型「做合理假设并在
+    最终回答里说明」。
+  - 桌面端（2026-09-09 已接）：SessionManager 构造时注入实现——广播
+    `ask_user` 事件，渲染层在 Composer 上方弹问答卡（选项按钮 + 自由输入），
+    答案经 `answerAsk` RPC 回主进程唤醒挂起的 Promise，`ask_user_done`
+    广播收尾。空答案 = 跳过（视为中断）。WS 独立 UI 走同一条
+    dispatchApi 通道，天然可用。
+  - bot：尚未接（挂起等下一条异步消息即可，接法同上）。
+- **中断语义**：实现方应尊重 `ctx.signal`，agent 被 abort 时返回 `null`；
+  工具侧把 `null` 转成 `fail("提问被中断…")`，不抛异常。
+- **不走 approvalGate**：提问本身就是知情同意机制，`isMutating: false`，
+  桌面端不要再给它套审批弹窗（会双重弹窗）。
 
 ### Computer Use 坐标与安全约定
 

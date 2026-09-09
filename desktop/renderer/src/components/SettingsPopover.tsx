@@ -1,7 +1,19 @@
-import React, { useRef } from "react";
+import React, { useRef, useState } from "react";
 import { Settings } from "lucide-react";
 import { cn } from "../lib/utils";
 import { openPopoverAt } from "./ToolsPanel";
+
+/** 输入提示行开关的 localStorage key（渲染层本地偏好，Composer 与设置弹层共用） */
+export const COMPOSER_HINTS_KEY = "c-agent.composer.hints";
+
+/** 读输入提示行开关；缺省/读取失败视为显示（默认行为不变） */
+export function readComposerHints(): boolean {
+  try {
+    return localStorage.getItem(COMPOSER_HINTS_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
 
 /**
  * 「设置」触发按钮（齿轮）：渲染在 Composer 底部状态栏（模型 / 模式 / 上下文
@@ -58,6 +70,31 @@ function ToggleRow({
 }
 
 /**
+ * 「输入提示行」开关：控制 Composer 底部快捷键提示 footer 的显隐。
+ * 纯渲染层偏好，localStorage 持久化——弹层子窗口与主窗口同源共享同一份
+ * localStorage，主窗口 Composer 靠 storage 事件感知变化。
+ */
+function ComposerHintsToggle(): React.ReactElement {
+  const [on, setOn] = useState<boolean>(() => readComposerHints());
+  return (
+    <ToggleRow
+      on={on}
+      label="输入提示行"
+      desc={on ? "已开启：输入框底部显示快捷键与字数" : "关闭中：隐藏快捷键提示 footer"}
+      onClick={() => {
+        const next = !on;
+        setOn(next);
+        try {
+          localStorage.setItem(COMPOSER_HINTS_KEY, next ? "1" : "0");
+        } catch {
+          // localStorage 不可用：仅本次会话内无效，不阻塞开关
+        }
+      }}
+    />
+  );
+}
+
+/**
  * 「设置」弹层内容，渲染在弹层子窗口里（PopoverHost）。
  * 与运行模式弹层不同：切换后不关弹层（开关有回显，refresh-info 由主进程
  * 广播、PopoverHost 重拉 info），用户可以连续调多项再点别处收起。
@@ -66,18 +103,30 @@ export function SettingsContent({
   approvalMode,
   autoCompact,
   msgWindow,
+  localPreview,
+  alwaysOnTop,
   onApprovalModeChange,
   onAutoCompactChange,
   onMsgWindowChange,
+  onLocalPreviewChange,
+  onAlwaysOnTopChange,
 }: {
   approvalMode: boolean;
   autoCompact: boolean;
   /** 独立消息弹窗开关状态（info.msgWindow） */
   msgWindow: boolean;
+  /** agent 本地服务预览开关状态（info.localPreview），默认关闭 */
+  localPreview: boolean;
+  /** 窗口置顶开关状态（info.alwaysOnTop），默认关闭 */
+  alwaysOnTop: boolean;
   onApprovalModeChange: (on: boolean) => void;
   onAutoCompactChange: (on: boolean) => void;
   /** 切换独立消息弹窗：主进程创建/销毁小窗 + refresh-info 广播回显 */
   onMsgWindowChange: (on: boolean) => void;
+  /** 切换本地服务预览：refresh-info 广播后回显开关 */
+  onLocalPreviewChange: (on: boolean) => void;
+  /** 切换窗口置顶：主进程 setAlwaysOnTop + refresh-info 广播回显 */
+  onAlwaysOnTopChange: (on: boolean) => void;
 }): React.ReactElement {
   return (
     <div className="w-full overflow-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-md">
@@ -109,6 +158,33 @@ export function SettingsContent({
           desc={msgWindow ? "已开启：小窗实时显示回复，可拖动、独立存在" : "关闭中：开启后可单独查看消息流"}
           onClick={() => onMsgWindowChange(!msgWindow)}
         />
+        {/* agent 本地服务预览：开启后状态栏出现「本地服务」入口，列出 agent 在
+            bash 里启动的本地服务（localhost 地址），默认不开启。 */}
+        <ToggleRow
+          on={localPreview}
+          label="agent开启的本地服务预览"
+          desc={
+            localPreview
+              ? "已开启：状态栏显示本地服务入口，可预览服务页面"
+              : "关闭中：不显示 agent 启动的本地服务"
+          }
+          onClick={() => onLocalPreviewChange(!localPreview)}
+        />
+        {/* 窗口置顶：开启后主窗口始终浮在所有窗口之上，默认不开启。
+            Windows / macOS 都是系统级 always-on-top（macOS floating 级别）。 */}
+        <ToggleRow
+          on={alwaysOnTop}
+          label="窗口置顶"
+          desc={
+            alwaysOnTop
+              ? "已开启：窗口始终显示在其他窗口前面"
+              : "关闭中：开启后窗口保持最前显示"
+          }
+          onClick={() => onAlwaysOnTopChange(!alwaysOnTop)}
+        />
+        {/* 输入提示行：纯渲染层偏好（localStorage），不走主进程——
+            与上面的开关不同，不需要 refresh-info 回显（组件自有 state）。 */}
+        <ComposerHintsToggle />
       </div>
     </div>
   );

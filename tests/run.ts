@@ -25,6 +25,7 @@ import {
   calibrateCharsPerToken,
   createInitialState,
   currentNode,
+  deleteSession,
   messageChars,
   latestSessionId,
   listSessions,
@@ -54,7 +55,7 @@ import {
   resolveModel,
 } from "../src/providers/index.js";
 import type { StreamEvent, StreamFn, StreamOptions } from "../src/providers/types.js";
-import { allTools, bashTool, editTool, globTool, grepTool, readTool, resolveShell, writeTool, type ToolName } from "../src/tools/index.js";
+import { allTools, askUserTool, setAskUserHandler, bashTool, editTool, globTool, grepTool, readTool, resolveShell, writeTool, type ToolName } from "../src/tools/index.js";
 import type { Tool } from "../src/tools/types.js";
 import { ok } from "../src/tools/types.js";
 import { globToRegExp, matchesGlob } from "../src/tools/glob-matcher.js";
@@ -63,6 +64,8 @@ import { buildSeedMessages, readGitSnapshot, DEFAULT_PREFILL_COMMIT } from "../s
 import { buildApprovalDetail } from "../desktop/main/approval-diff.js";
 import { createPrintOutput } from "../src/ui/print.js";
 import { createMarkdownStream, renderMarkdown } from "../src/ui/markdown.js";
+import { FakeInput } from "../src/ui/input.js";
+import { createReplAskUser } from "../src/ui/repl.js";
 import type {
   AgentMessage,
   AssistantMessage,
@@ -71,7 +74,7 @@ import type {
 } from "../src/types.js";
 import { emptyUsage } from "../src/types.js";
 
-import { test } from "./registry.js";
+import { sleep, test } from "./registry.js";
 
 /** 取工具结果内容里的全部文本（content 现在可能含 screenshot 返回的图片块） */
 function resultText(content: { type: string; text?: string }[]): string {
@@ -87,6 +90,7 @@ import "./display-connector.js";
 import "./ws-bridge.js";
 import "./bot-runner.js";
 import "./bot-weixin.js";
+import "./log.js";
 
 const noSignal = (): AbortSignal => new AbortController().signal;
 
@@ -247,6 +251,81 @@ test("bash: 成功、失败与超时", async () => {
   );
   assert.equal(slow.isError, true);
   assert.match(resultText(slow.content), /超时/);
+});
+
+// ---------------------------------------------------------------- ask_user
+
+test("ask_user: 未接通道时优雅失败并给出兜底指引", async () => {
+  // 保证没有残留 handler（其他用例 finally 里都会清）
+  setAskUserHandler(undefined);
+  const r = await askUserTool.execute(
+    { question: "用 A 还是 B？" },
+    { cwd: ".", signal: noSignal() },
+  );
+  assert.equal(r.isError, true);
+  assert.match(resultText(r.content), /提问通道/);
+  assert.match(resultText(r.content), /假设/);
+});
+
+test("ask_user: REPL 通道渲染问题选项，下一行输入即答案", async () => {
+  const input = new FakeInput();
+  const out: string[] = [];
+  setAskUserHandler(createReplAskUser({ input, output: (t) => out.push(t) }));
+  try {
+    const pending = askUserTool.execute(
+      { question: "用哪个方案？", choices: ["方案 A", "方案 B"] },
+      { cwd: ".", signal: noSignal() },
+    );
+    await sleep(10); // 让通道把问题渲染出去并挂上 waiter
+    input.pushLine("2"); // 数字快捷回答 → 映射成选项原文
+    const r = await pending;
+    assert.equal(r.isError, false);
+    assert.equal(resultText(r.content), "用户的回答：方案 B");
+
+    const rendered = out.join("");
+    assert.match(rendered, /\[模型提问\] 用哪个方案？/);
+    assert.match(rendered, /1\. 方案 A/);
+    assert.match(rendered, /2\. 方案 B/);
+  } finally {
+    setAskUserHandler(undefined);
+  }
+});
+
+test("ask_user: 自由文本透传；abort 与 EOF 走中断", async () => {
+  try {
+    // 自由文本直接透传给模型
+    const input = new FakeInput();
+    setAskUserHandler(createReplAskUser({ input, output: () => {} }));
+    const p1 = askUserTool.execute({ question: "叫什么？" }, { cwd: ".", signal: noSignal() });
+    await sleep(10);
+    input.pushLine("张三");
+    const r1 = await p1;
+    assert.equal(r1.isError, false);
+    assert.equal(resultText(r1.content), "用户的回答：张三");
+
+    // agent 被 abort → 提问立刻中断（不等用户输入）
+    const ac = new AbortController();
+    const input2 = new FakeInput();
+    setAskUserHandler(createReplAskUser({ input: input2, output: () => {} }));
+    const p2 = askUserTool.execute({ question: "继续吗？" }, { cwd: ".", signal: ac.signal });
+    await sleep(10);
+    ac.abort();
+    const r2 = await p2;
+    assert.equal(r2.isError, true);
+    assert.match(resultText(r2.content), /中断/);
+
+    // EOF（Ctrl-D）→ 同样视为没有得到回答
+    const input3 = new FakeInput();
+    setAskUserHandler(createReplAskUser({ input: input3, output: () => {} }));
+    const p3 = askUserTool.execute({ question: "还在吗？" }, { cwd: ".", signal: noSignal() });
+    await sleep(10);
+    input3.pushEof();
+    const r3 = await p3;
+    assert.equal(r3.isError, true);
+    assert.match(resultText(r3.content), /中断/);
+  } finally {
+    setAskUserHandler(undefined);
+  }
 });
 
 // -------------------------------------------------------- glob / grep
@@ -2413,6 +2492,24 @@ test("setMsgWindow：独立消息弹窗默认不开启，开关回显 info", () 
   assert.equal(sm.info().msgWindow, false);
 });
 
+test("setAlwaysOnTop：窗口置顶默认不开启，开关回显 info", () => {
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "openai", id: "gpt-4o-mini" },
+    tools: [],
+  });
+  const sm = new SessionManager(
+    { state, queue: new MessageQueue(), resolved: { model: { provider: "openai", id: "gpt-4o-mini" }, stream: createMockStream({ delayMs: 0 }) } },
+    { emit: () => {} },
+  );
+
+  assert.equal(sm.info().alwaysOnTop, false, "默认不开启（用户定调）");
+  sm.setAlwaysOnTop(true);
+  assert.equal(sm.info().alwaysOnTop, true, "开启后 info 回显，设置弹层靠它回显开关");
+  sm.setAlwaysOnTop(false);
+  assert.equal(sm.info().alwaysOnTop, false);
+});
+
 test("setCustomModel：anthropic / gemini 协议直接构造对应 provider", () => {
   const state = createInitialState({
     cwd: process.cwd(),
@@ -3482,6 +3579,32 @@ test("sessions: listSessions 按 savedAt 倒序，latestSessionId 取最新", as
   assert.equal(list.length, 2);
   assert.equal(list[0]?.id, id2, "新的在前");
   assert.equal(await latestSessionId(dir), id2);
+});
+
+test("sessions: deleteSession 删文件；不存在 / 非法 id（路径穿越）→ false", async () => {
+  const dir = await tempDir();
+  const state = createInitialState({
+    cwd: dir,
+    model: { provider: "mock", id: "mock-1" },
+    tools: allTools,
+  });
+  const id = await saveSession(state, dir);
+  assert.ok(await sessionFileExists(dir, id));
+
+  assert.equal(await deleteSession(dir, id), true);
+  assert.equal(await sessionFileExists(dir, id), false);
+  assert.equal((await listSessions(dir)).length, 0);
+
+  assert.equal(await deleteSession(dir, id), false, "文件已不在 → false");
+  assert.equal(await deleteSession(dir, "s_nothing"), false, "不存在的 id → false");
+  assert.equal(await deleteSession(dir, "../escape"), false, "路径穿越 id 拒绝");
+  assert.equal(await deleteSession(dir, "a/b"), false, "含路径分隔符的 id 拒绝");
+  assert.equal(await deleteSession(dir, ".hidden"), false, "点开头的 id 拒绝");
+  // 拒绝的请求不能误删别的文件
+  await fs.mkdir(sessionsDir(dir), { recursive: true });
+  await fs.writeFile(path.join(sessionsDir(dir), "s_keep.json"), "{}", "utf8");
+  assert.equal(await deleteSession(dir, "s_keep"), true, "合法 id 正常删除");
+  await fs.rm(dir, { recursive: true, force: true });
 });
 
 test("sessions: 载入不存在的 id / 损坏文件返回 false，state 不动", async () => {

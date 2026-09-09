@@ -353,6 +353,7 @@ function registerIpcHandlers(deps: StartDeps): void {
   handle(IPC.SUBMIT, "submit");
   handle(IPC.STEER, "steer");
   handle(IPC.ABORT, "abort");
+  handle(IPC.ANSWER_ASK, "answerAsk");
   handle(IPC.SET_MODEL, "setModel", "refresh-info", true);
   handle(IPC.SET_CUSTOM_MODEL, "setCustomModel", "refresh-info", true);
   handle(IPC.SET_MODE, "setMode", "refresh-info");
@@ -371,6 +372,22 @@ function registerIpcHandlers(deps: StartDeps): void {
     }
     pushEvent({ t: "ui_action", action: "refresh-info" });
   });
+  // agent 本地服务预览开关：只落偏好 + refresh-info 回显（服务列表照常收集，
+  // 开关只控制状态栏入口与预览弹窗的可见性，无需窗口副作用）
+  ipcMain.handle(IPC.SET_LOCAL_PREVIEW, async (_e: IpcMainInvokeEvent, on: unknown) => {
+    await dispatchApi(session!, "setLocalPreview", [on === true]);
+    pushEvent({ t: "ui_action", action: "refresh-info" });
+  });
+  // 窗口置顶开关：偏好落 SessionManager（dispatcher），setAlwaysOnTop 在这里做。
+  // Windows / macOS 都是系统级 always-on-top（macOS 默认 "floating" 级别，
+  // 普通应用之上；不抢全屏空间和系统 UI）。
+  ipcMain.handle(IPC.SET_ALWAYS_ON_TOP, async (_e: IpcMainInvokeEvent, on: unknown) => {
+    await dispatchApi(session!, "setAlwaysOnTop", [on === true]);
+    if (mainWindow !== null && !mainWindow.isDestroyed()) {
+      mainWindow.setAlwaysOnTop(on === true);
+    }
+    pushEvent({ t: "ui_action", action: "refresh-info" });
+  });
   // 弹层子窗口里切会话：主窗口靠 sessions-changed 触发 applyRemoteSwitch（reset + 重拉）
   handle(IPC.SWITCH_TO, "switchTo", "sessions-changed");
   handle(IPC.PAUSE, "pause");
@@ -379,6 +396,9 @@ function registerIpcHandlers(deps: StartDeps): void {
   handle(IPC.NEW_SESSION, "newSession");
   handle(IPC.SWITCH_SESSION, "switchSession");
   handle(IPC.LIST_SESSIONS, "listSessions");
+  // 「历史会话」：磁盘持久化清单只读、删除无窗口副作用，直接走 dispatcher
+  handle(IPC.LIST_PERSISTED_SESSIONS, "listPersistedSessions");
+  handle(IPC.DELETE_SESSION, "deleteSession");
   handle(IPC.LIST_FILES, "listFiles");
   handle(IPC.LIST_MODELS, "listModels");
   handle(IPC.LIST_CUSTOM_MODELS, "listCustomModels");

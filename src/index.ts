@@ -16,6 +16,7 @@ import {
 import { ConnectorLoader } from "./connector/loader/connector-loader.js";
 import { ConnectorRuntime } from "./connector/runtime/connector-runtime.js";
 import type { StreamFn } from "./providers/types.js";
+import { initFileLogging, log } from "./log/index.js";
 import { assembleSession, buildSeedMessages, resolveModelSpec } from "./session.js";
 import type { ModelRef } from "./types.js";
 import { InputController } from "./ui/input.js";
@@ -34,6 +35,7 @@ const HELP = [
   "  /clear             清空对话历史",
   "  /compact           把对话历史压缩成模型摘要（旧分支保留，可回溯）",
   "  /sessions          列出已持久化的会话（.c-agent/sessions/）",
+  "  /sessions rm <id>  删除指定会话（id 可只写前缀，当前会话不可删）",
   "  /verbose           切换是否显示思考过程",
   "  /exit              退出（也可用 Ctrl-D）",
   "",
@@ -73,6 +75,10 @@ const HELP = [
   "Connector：",
   "  --connectors <dir>           扫描目录，加载 connector 暴露的工具",
   "                            （可多次，目录里需有 connector.json + 默认导出 class）",
+  "",
+  "日志：",
+  "  运行日志写入 <cwd>/.c-agent/logs/（按天一份，保留最近 7 份）。",
+  "  环境变量 C_AGENT_LOG=debug|info|warn|error|off 调整详细度（默认 info）。",
 ].join("\n");
 
 interface CliArgs {
@@ -225,6 +231,9 @@ async function main(): Promise<number> {
 
   const cwd = path.resolve(args.cwd ?? process.cwd());
 
+  // 文件日志先开：后面的模型解析、会话恢复出错才有地方查
+  initFileLogging(cwd);
+
   // 没有终端就没有交互可言：提示词读不进来、进度也画不出来，直接走 print 模式
   const stdinIsTty = process.stdin.isTTY === true;
   const printMode = args.print || !stdinIsTty || process.stdout.isTTY !== true;
@@ -286,6 +295,10 @@ async function main(): Promise<number> {
   // resolved 后续 /model 命令会改，所以单独拎出来
   let resolved = assembled.resolved;
   let verbose = args.verbose;
+  log.info(
+    "cli",
+    `启动 mode=${printMode ? "print" : "repl"} model=${resolved.model.provider}:${resolved.model.id} cwd=${cwd}`,
+  );
 
   // 会话持久化：--resume 整体还原会话树（含 compact 旧分支）；失败降级为全新会话。
   // 信息走 stderr——print 模式的 stdout 是答案本身，不能混入进度文本。
@@ -404,11 +417,21 @@ async function main(): Promise<number> {
   return exitCode!;
 }
 
+// 未捕获异常兜底：先落日志再复刻默认崩溃语义（stderr 打印 + 非零退出码）。
+// 未处理的 Promise rejection（Node 15+ 默认按崩溃处理）同样走这里——
+// 这是「开发人员不知道错在哪里」的最大黑洞，必须在进程死掉前留一份现场。
+process.on("uncaughtException", (err) => {
+  log.error("cli", "未捕获异常", err);
+  console.error(err);
+  process.exit(1);
+});
+
 main().then(
   (code: number) => {
     process.exitCode = code;
   },
   (err: unknown) => {
+    log.error("cli", "main() 顶层异常", err);
     console.error(err);
     process.exitCode = 1;
   },

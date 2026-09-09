@@ -38,6 +38,7 @@ export { MessageQueue } from "./queue.js";
 
 export {
   configPath,
+  deleteSession,
   latestSessionId,
   listSessions,
   loadSessionInto,

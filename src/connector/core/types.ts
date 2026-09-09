@@ -130,7 +130,15 @@ export type SessionSignal =
    * 结果随后以 approval_done 广播（id 对应）。
    */
   | { t: "approval_request"; id: string; toolName: string; args: string }
-  | { t: "approval_done"; id: string; allow: boolean };
+  | { t: "approval_done"; id: string; allow: boolean }
+  /**
+   * ask_user 工具（模型 → 用户提问）：主进程收到模型提问后广播，显示端
+   * 弹问答卡；随后以 ask_user_done 广播收尾（所有显示端据此撤下问答卡）。
+   * 形状与 shared/api.ts 的 WireEvent 对应变体保持一致。
+   */
+  | { t: "ask_user"; id: string; question: string; choices?: string[] }
+  /** ask_user 收尾：answer 有值 = 用户已回答；aborted=true = 中断/跳过（无答案）。 */
+  | { t: "ask_user_done"; id: string; answer?: string; aborted?: boolean };
 
 /** SessionManager 发给显示通道的事件：原始 Agent 事件或会话信号 */
 export type DisplayEvent = import("../../agent/agent.js").AgentEvent | SessionSignal;

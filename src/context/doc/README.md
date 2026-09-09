@@ -182,7 +182,9 @@ class MessageQueue {
 
 - **自动保存**：`AgentOptions.persistSessions`（默认 false）→ 每次 `agent_end`
   后落盘，同一 state 复用同一个会话 id；CLI 交互模式已开启。
-- **恢复**：CLI `--resume [id]`（省略 id 取最近一次）；REPL `/sessions` 列清单。
+- **恢复**：CLI `--resume [id]`（省略 id 取最近一次）；REPL `/sessions` 列清单，
+  `/sessions rm <id>` 删除（前缀唯一匹配；当前会话拒绝删——自动保存会立刻重建）。
+  `deleteSession` 校验 id 字符集（堵路径穿越），坏输入静默返回 false 不抛错。
 - **用户配置**（config.json）：`/model`（CLI）或桌面端的模型切换经 `saveModelSpec` 存
   `.c-agent/config.json`（`readSavedModelSpec` 读回），启动时按 `--model` 参数（仅 CLI）>
   `MODEL` env > 持久值 > 内置默认取用；`--model` 是一次性覆盖不落盘。存可回放的

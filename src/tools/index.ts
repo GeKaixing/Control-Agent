@@ -1,6 +1,7 @@
 /** 工具注册表 */
 
 import type { LlmTool } from "../providers/types.js";
+import { askUserTool } from "./ask-user.js";
 import { bashTool, resolveShell, type ShellSpec } from "./bash.js";
 import { computerTool } from "./computer.js";
 import { editTool } from "./edit.js";
@@ -32,6 +33,7 @@ const _registry = {
   memory: memoryTool,
   screenshot: screenshotTool,
   computer: computerTool,
+  ask_user: askUserTool,
 } as const;
 
 export const TOOL_REGISTRY = _registry;
@@ -64,6 +66,7 @@ export function describeToolsForModel(tools: Tool[] = allTools): LlmTool[] {
 }
 
 export type { Tool, ToolContext, ToolResult } from "./types.js";
-export { bashTool, computerTool, editTool, globTool, grepTool, memoryTool, readTool, screenshotTool, writeTool, resolveShell };
+export { askUserTool, bashTool, computerTool, editTool, globTool, grepTool, memoryTool, readTool, screenshotTool, writeTool, resolveShell };
+export { setAskUserHandler, type AskUserFn, type AskUserRequest } from "./ask-user.js";
 export { memoryPath, MEMORY_FILE } from "./memory.js";
 export type { ShellSpec };

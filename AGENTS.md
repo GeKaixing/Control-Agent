@@ -136,7 +136,7 @@ g/
 │   │   ├── mock.ts               离线测试与 print 模式
 │   │   ├── index.ts              resolveModel + providers 表
 │   │   └── doc/                  子模块文档（README.md）
-│   ├── tools/                  9 个内置工具
+│   ├── tools/                  10 个内置工具
 │   │   ├── types.ts              Tool 接口 + ok() / fail() / okImage()
 │   │   ├── validate.ts           JSON Schema 参数校验
 │   │   ├── fs-utils.ts           resolvePath / truncateText / 跳过隐藏目录
@@ -151,6 +151,7 @@ g/
 │   │   ├── darwin-cu.ts          macOS Computer Use 后端：screencapture + JXA/CGEvent
 │   │   ├── screenshot.ts         Computer Use 感知端：截屏 → JPEG（Windows/macOS）
 │   │   ├── computer.ts           Computer Use 执行端：鼠标/键盘/滚轮（Windows/macOS）
+│   │   ├── ask-user.ts           模型 → 用户提问通道（端点经 setAskUserHandler 注入实现）
 │   │   ├── index.ts              TOOL_REGISTRY + ToolName 派生源
 │   │   └── doc/                  子模块文档（README.md）
 │   ├── ui/                     终端交互
@@ -158,6 +159,10 @@ g/
 │   │   ├── renderer.ts           AgentEvent → 终端着色
 │   │   ├── markdown.ts           Markdown → ANSI（流式按行攒 + 一次性渲染）
 │   │   ├── print.ts              -p / 管道 / 缺 TTY 走这条
+│   │   └── doc/                  子模块文档（README.md）
+│   ├── log/                    文件日志
+│   │   ├── logger.ts             分级日志 → .c-agent/logs/（按天一份、绝不抛错）
+│   │   ├── index.ts              统一出口（引用方只认这里）
 │   │   └── doc/                  子模块文档（README.md）
 │   └── doc/                    src/ 全局文档（README.md：数据流图 + 约定）
 └── tests/
@@ -174,7 +179,7 @@ g/
 - **agent/** — 项目的核心；外层等用户输入，内层跑模型 ↔ 工具直到模型给出终态
 - **context/** — 上下文的全部实现：会话树存储、系统提示词、token 估算、交给模型前的三步后处理、消息入队
 - **providers/** — 把各家厂商的流式协议收敛成同一个 `StreamFn`，加供应商只需在这里挂一份
-- **tools/** — 7 个内置工具的注册与共享辅助；memory 工具承担跨会话记忆的写入端
+- **tools/** — 10 个内置工具的注册与共享辅助；memory 工具承担跨会话记忆的写入端，ask_user 工具承担模型 → 用户提问（答案作为 toolResult 回灌）
 - **ui/** — 渲染器只读 `AgentEvent`，不知道「模型」或「工具」是谁
 - **ui/markdown.ts** — 唯一知道 ANSI 转义序列的地方；`enabled: false` 时纯透传
 - **tests/run.ts** — 入口编排 + 直接 import 内部模块的单元 / 集成测试，最快的那批
