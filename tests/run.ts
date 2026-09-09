@@ -3294,6 +3294,53 @@ test("info().contextWindow：自定义模型 baseUrl 直连 /models 的元数据
   );
 });
 
+test("listModels：自定义模型在场直连 baseUrl + 模型自带 key，不打 env 端点", async () => {
+  const state = createInitialState({ cwd: process.cwd(), model: { provider: "mock", id: "mock-1" }, tools: [] });
+  const queue = new MessageQueue();
+  const payload = { object: "list", data: [{ id: "mimo-v2.5", owned_by: "opencode" }] };
+  const requested: Array<{ url: string; headers: Record<string, string> }> = [];
+  const fakeFetch = (async (url: string | URL, init?: { headers?: Record<string, string> }) => {
+    requested.push({ url: String(url), headers: init?.headers ?? {} });
+    return { ok: true, status: 200, json: async () => payload } as unknown as Response;
+  }) as unknown as typeof fetch;
+
+  const sm = new SessionManager(
+    {
+      state,
+      queue,
+      resolved: {
+        model: {
+          provider: "openai",
+          id: "mimo-v2.5",
+          baseUrl: "https://opencode.ai/zen/go/v1",
+          apiKey: "sk-zen",
+        },
+        stream: createMockStream({ delayMs: 0 }),
+      },
+    },
+    { emit: () => {}, fetchModels: fakeFetch },
+  );
+
+  // 桌面主进程没有 env key（真实 401 场景的前提）；测试进程可能带着，
+  // 手动清掉并在结束时还原——证明列表走的是模型自带 baseUrl/key，不碰 env。
+  const envKeys = ["OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODELS_URL"] as const;
+  const savedEnv = envKeys.map((k) => [k, process.env[k]] as const);
+  for (const k of envKeys) delete process.env[k];
+  try {
+    const r = await sm.listModels("openai");
+    assert.equal(r.error, undefined);
+    assert.equal(r.models[0]?.id, "mimo-v2.5");
+    assert.equal(requested.length, 1, "只应请求自定义 baseUrl 直连的 /models");
+    assert.equal(requested[0]?.url, "https://opencode.ai/zen/go/v1/models");
+    assert.equal(requested[0]?.headers["authorization"], "Bearer sk-zen", "鉴权用模型自带的 key");
+  } finally {
+    for (const [k, v] of savedEnv) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
 test("listCustomModels：三协议 URL 推导与鉴权头；无 key 不带鉴权；非 http 前缀直接报错", async () => {
   const state = createInitialState({ cwd: process.cwd(), model: { provider: "mock", id: "mock-1" }, tools: [] });
   const queue = new MessageQueue();

@@ -1149,14 +1149,20 @@ export class SessionManager {
   /**
    * 拉取端点的可用模型列表（OpenAI 兼容 GET /models）。
    *
-   * 可配置链路（resolveModelsUrl）：
-   *  - env OPENAI_MODELS_URL / ANTHROPIC_MODELS_URL 显式覆盖（完整 URL）
-   *  - 否则按端点 baseUrl 推导（openai: `${baseUrl}/models`；anthropic: `${baseUrl}/v1/models`）
+   * URL 与鉴权的取法（两级）：
+   *  1. 当前模型是自定义模型（带显式 baseUrl）且协议归属该端点 → 直连
+   *     baseUrl 推导的 /models + 模型自带的 key。桌面端 key 存 ModelRef
+   *     不进 env，走 env 推导几乎必然 401（真实案例：自定义模型对话一切
+   *     正常，模型菜单却打到 api.openai.com → 401）；弹层头部展示的
+   *     baseURL 也是自定义模型的 baseUrl，列表与展示必须同源——与
+   *     warmModelsCache / metadataTargets 的自定义模型直连同一条规则。
+   *  2. 否则按端点走 env（resolveModelsUrl / modelsAuthHeaders）：
+   *    OPENAI_MODELS_URL 等显式覆盖优先，缺省按 baseUrl 推导。
    *  - mock 端点不走网络，固定返回 [{ id: "mock" }]
    *
    * 缓存：同 models URL 5 分钟内直接返回缓存（refresh=true 强制刷新）。
    * 失败兜底：任何网络 / 解析错误都转成 result.error 返回（不 throw），
-   * 前端拿到 error 后回退静态预设列表——保证下拉永远可用。
+   * 前端拿到 error 后回退「自定义模型」手动填写——保证下拉永远可用。
    */
   async listModels(endpoint: EndpointId = this.endpoint, refresh = false): Promise<ListModelsResult> {
     if (!isValidEndpoint(endpoint)) endpoint = this.endpoint;
@@ -1164,7 +1170,11 @@ export class SessionManager {
     if (endpoint === "mock") {
       return { endpoint, url: "(mock)", models: [{ id: "mock", ownedBy: "builtin" }] };
     }
-    const url = resolveModelsUrl(endpoint);
+    const m = this.resolved.model;
+    const customBase = m.baseUrl;
+    const useCustom =
+      customBase !== undefined && customBase.length > 0 && inferEndpointFromProvider(m.provider) === endpoint;
+    const url = useCustom ? modelsUrlForBaseUrl(m.provider, customBase) : resolveModelsUrl(endpoint);
     if (url === undefined) {
       return { endpoint, url: "(unknown)", models: [], error: "该端点没有可用的模型列表 URL" };
     }
@@ -1174,7 +1184,7 @@ export class SessionManager {
     }
     const result = await this.fetchModelsAt(url, {
       parseAs: endpoint,
-      headers: modelsAuthHeaders(endpoint),
+      headers: useCustom ? this.customModelAuthHeaders() : modelsAuthHeaders(endpoint),
     });
     // 只缓存成功结果——失败下次再试（网络恢复后无需等 TTL）
     if (result.error === undefined) {
