@@ -26,7 +26,14 @@ import { allTools, readTool, memoryTool, memoryPath } from "../src/tools/index.j
 import { matchCatastrophicCommand, bashTool } from "../src/tools/bash.js";
 import { fail, ok, type Tool } from "../src/tools/types.js";
 import { openaiStream, reasoningEffort } from "../src/providers/openai.js";
-import { assembleSession, collectProjectMemory, readGitSnapshot } from "../src/session.js";
+import {
+  assembleSession,
+  collectProjectMemory,
+  formatAdbSnapshotLine,
+  parseAdbDevices,
+  readAdbSnapshot,
+  readGitSnapshot,
+} from "../src/session.js";
 import { convertToLlm } from "../src/agent/convert.js";
 import type { LlmMessage } from "../src/providers/types.js";
 
@@ -389,6 +396,27 @@ test("Permission：灾难命令模式识别（纯函数）", () => {
   assert.ok(matchCatastrophicCommand("dd if=zero of=/dev/disk0") !== null);
   assert.ok(matchCatastrophicCommand(":(){ :|:& };:") !== null);
   assert.ok(matchCatastrophicCommand("chmod -R 777 /") !== null);
+  // Windows 灾难模式（format / diskpart / 递归删盘 / 注册表 hive / 卷影副本）
+  assert.ok(matchCatastrophicCommand("format C: /fs:ntfs") !== null);
+  assert.ok(matchCatastrophicCommand("format.com D:") !== null);
+  assert.ok(matchCatastrophicCommand("echo select disk 0 > dp.txt && echo clean >> dp.txt && diskpart /s dp.txt") !== null);
+  assert.ok(matchCatastrophicCommand("Remove-Item -Recurse -Force C:\\") !== null);
+  assert.ok(matchCatastrophicCommand("Remove-Item -Recurse C:\\*") !== null);
+  assert.ok(matchCatastrophicCommand("rm -Recurse $env:USERPROFILE") !== null);
+  assert.ok(matchCatastrophicCommand("Remove-Item -Recurse ~") !== null);
+  assert.ok(matchCatastrophicCommand("rd /s /q C:\\") !== null);
+  assert.ok(matchCatastrophicCommand("del /s /q C:\\*.*") !== null);
+  assert.ok(matchCatastrophicCommand("reg delete HKLM /f") !== null);
+  assert.ok(matchCatastrophicCommand("reg delete HKLM\\SOFTWARE /f") !== null);
+  assert.ok(matchCatastrophicCommand("vssadmin delete shadows /all /quiet") !== null);
+  assert.ok(matchCatastrophicCommand("wmic shadowcopy where \"Drive='C:'\" delete") !== null);
+  // Windows 日常操作不拦（子目录、深层注册表键、format-patch 等同形词）
+  assert.equal(matchCatastrophicCommand("Remove-Item -Recurse ./dist"), null);
+  assert.equal(matchCatastrophicCommand("Remove-Item -Recurse C:\\temp\\build"), null);
+  assert.equal(matchCatastrophicCommand("del /s /q C:\\temp\\*.log"), null);
+  assert.equal(matchCatastrophicCommand("reg delete HKCU\\Environment /v TEMP /f"), null);
+  assert.equal(matchCatastrophicCommand("git format-patch -1 HEAD"), null);
+  assert.equal(matchCatastrophicCommand("Get-ChildItem -Recurse C:\\Windows"), null);
   // 日常危险操作不拦
   assert.equal(matchCatastrophicCommand("rm -rf node_modules build"), null);
   assert.equal(matchCatastrophicCommand("rm -rf /tmp/x"), null);
@@ -504,6 +532,50 @@ test("Environment：readGitSnapshot 在真实 git 仓库读出分支", async () 
 
   const outside = await readGitSnapshot(await tmpDir());
   assert.equal(outside, null);
+});
+
+test("Environment：parseAdbDevices 解析 adb 输出；注入行区分有/无设备", async () => {
+  // 标准输出：daemon 告警 + 表头 + 两台设备（一台已授权一台未授权）
+  const devices = parseAdbDevices(
+    [
+      "* daemon not running; starting now at tcp:5037",
+      "List of devices attached",
+      "emulator-5554\tdevice",
+      "1A2B3C4D\tunauthorized",
+      "",
+    ].join("\n"),
+  );
+  assert.deepEqual(devices, [
+    { serial: "emulator-5554", state: "device" },
+    { serial: "1A2B3C4D", state: "unauthorized" },
+  ]);
+
+  // Windows \r\n 换行也能解析
+  assert.deepEqual(
+    parseAdbDevices("List of devices attached\r\nXYZ123\tdevice\r\n"),
+    [{ serial: "XYZ123", state: "device" }],
+  );
+
+  // adb 在场但没设备 → 空数组
+  assert.deepEqual(parseAdbDevices("List of devices attached\n"), []);
+
+  // 注入行：有设备时报设备名与能力提示；未授权的提醒确认弹窗
+  const line = formatAdbSnapshotLine({ devices });
+  assert.match(line, /emulator-5554\(device\)/);
+  assert.match(line, /1A2B3C4D\(unauthorized\)/);
+  assert.match(line, /adb shell am start/);
+  assert.match(line, /USB 调试授权弹窗/);
+
+  // 无设备：仍告知 adb 通道存在，并指路 USB 调试
+  const emptyLine = formatAdbSnapshotLine({ devices: [] });
+  assert.match(emptyLine, /adb 可用/);
+  assert.match(emptyLine, /USB 调试/);
+
+  // 真机探测：adb 未装 → null；装了 → devices 是数组（不假设本机是否连着手机）
+  const snap = await readAdbSnapshot();
+  if (snap !== null) {
+    assert.ok(Array.isArray(snap.devices));
+  }
 });
 
 // ------------------------------------------------------------ Tool：read 观测质量

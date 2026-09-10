@@ -41,5 +41,8 @@
   顶层 catch + `process.on("uncaughtException")` 兜底（先落日志再按原语义崩溃）。
 - `src/agent/agent.ts`：`callModel` 失败/重试、工具 `isError` 与执行异常、
   审批门异常、会话持久化失败、`emit` 观察者异常（原先静默吞掉的那类）。
-- 桌面端 / 微信 bot：Agent 内部的日志调用天然生效，但需要各自入口调
-  `initFileLogging` 才会真正写盘（桌面端 cwd 与 CLI 不同，待接入）。
+- 桌面端入口（`desktop/main/index.ts`）：`bootstrap()` 开头
+  `initFileLogging(process.cwd())`（锚 app home，稳定不随会话工作目录漂移）
+  + 启动信息 + `uncaughtException` / `unhandledRejection` 兜底。
+- 微信 bot：Agent 内部的日志调用天然生效，但需要入口调 `initFileLogging`
+  才会真正写盘（尚未接入）。

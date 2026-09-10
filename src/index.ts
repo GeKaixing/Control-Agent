@@ -15,6 +15,8 @@ import {
 } from "./context/index.js";
 import { ConnectorLoader } from "./connector/loader/connector-loader.js";
 import { ConnectorRuntime } from "./connector/runtime/connector-runtime.js";
+import { handleCronCommand } from "./cron/cli.js";
+import { CronScheduler, readCronJobs } from "./cron/index.js";
 import type { StreamFn } from "./providers/types.js";
 import { initFileLogging, log } from "./log/index.js";
 import { assembleSession, buildSeedMessages, resolveModelSpec } from "./session.js";
@@ -76,6 +78,15 @@ const HELP = [
   "  --connectors <dir>           扫描目录，加载 connector 暴露的工具",
   "                            （可多次，目录里需有 connector.json + 默认导出 class）",
   "",
+  "定时任务（cron）：",
+  "  npm start -- cron list                     列出定时任务",
+  '  npm start -- cron add "0 9 * * *" "写日报"   新增（5 字段 cron 表达式，建议引号包裹）',
+  "  npm start -- cron rm <id>                  删除（id 可只写前缀）",
+  "  npm start -- cron on <id> / cron off <id>  启用 / 停用",
+  "  npm start -- cron run                      前台守护：到点自动执行，Ctrl-C 退出",
+  "  交互模式用 /cron 同一套子命令；REPL 启动时调度器自动开启，",
+  "  到点任务会作为一条 [定时任务] 消息注入当前会话执行。",
+  "",
   "日志：",
   "  运行日志写入 <cwd>/.c-agent/logs/（按天一份，保留最近 7 份）。",
   "  环境变量 C_AGENT_LOG=debug|info|warn|error|off 调整详细度（默认 info）。",
@@ -113,6 +124,8 @@ interface CliArgs {
    * 字符串 = 指定会话 id。
    */
   resume: string | boolean | undefined;
+  /** cron 子命令参数（位置参数首词是 "cron" 时命中），如 ["add", "0 9 * * *", "写日报"] */
+  cron: string[] | null;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -131,6 +144,7 @@ function parseArgs(argv: string[]): CliArgs {
     markdown: true,
     connectorsPaths: [],
     resume: undefined,
+    cron: null,
   };
   const positional: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -164,7 +178,13 @@ function parseArgs(argv: string[]): CliArgs {
       args.connectorsPaths.push(dir);
     } else if (a !== undefined) positional.push(a);
   }
-  args.prompt = positional.join(" ").trim();
+  if (positional[0] === "cron") {
+    // cron 子命令：不并入提示词，交给 cron 模块处理
+    args.cron = positional.slice(1);
+    args.prompt = "";
+  } else {
+    args.prompt = positional.join(" ").trim();
+  }
   return args;
 }
 
@@ -233,6 +253,11 @@ async function main(): Promise<number> {
 
   // 文件日志先开：后面的模型解析、会话恢复出错才有地方查
   initFileLogging(cwd);
+
+  // cron 子命令：管理任务清单或前台守护，不进 agent 主流程
+  if (args.cron !== null) {
+    return handleCronCommand(cwd, args.cron);
+  }
 
   // 没有终端就没有交互可言：提示词读不进来、进度也画不出来，直接走 print 模式
   const stdinIsTty = process.stdin.isTTY === true;
@@ -315,6 +340,8 @@ async function main(): Promise<number> {
 
   let onEvent: (event: AgentEvent) => void;
   let exitCode: number;
+  // REPL 模式的定时任务调度器；print 模式没有常驻进程，调度无意义
+  let cronScheduler: CronScheduler | undefined;
   try {
   if (printMode) {
     const sink = createPrintOutput();
@@ -368,6 +395,31 @@ async function main(): Promise<number> {
       console.log(`  Connector：${connectorSummary.loadedCount} 个 / ${connectorSummary.toolCount} 个工具`);
     }
     if (resolved.degraded !== undefined) console.log(`  提示：${resolved.degraded}`);
+
+    // 定时任务调度器（REPL 常驻）：到点任务注入当前会话执行。
+    // agent 正在跑用户任务时延迟到下个 tick——不与用户回合抢 agent。
+    const enabledCronJobs = (await readCronJobs(cwd)).filter((j) => j.enabled).length;
+    if (enabledCronJobs > 0) console.log(`  定时任务：${enabledCronJobs} 个启用中（/cron 管理）`);
+    let cronBusy = false;
+    cronScheduler = new CronScheduler({
+      cwd,
+      isBusy: () => cronBusy || agent.isRunning,
+      onDue: (job) => {
+        cronBusy = true;
+        process.stdout.write(`\n[定时任务 ${job.id}] 触发：${job.prompt}\n`);
+        agent.enqueueUser(`[定时任务] ${job.prompt}`);
+        void agent
+          .run()
+          .catch((err: unknown) => {
+            log.error("cron", `任务 ${job.id} 执行失败`, err instanceof Error ? err : undefined);
+          })
+          .finally(() => {
+            cronBusy = false;
+          });
+      },
+    });
+    cronScheduler.start();
+
     console.log(`  输入 /help 查看命令，Ctrl-C 中断当前任务，Ctrl-D 退出。\n`);
 
     // 启动时若提供了 user-prompt / assistant-prompt，先跑一轮（prefill 同理）
@@ -412,6 +464,7 @@ async function main(): Promise<number> {
     });
   }
   } finally {
+    cronScheduler?.stop();
     await connectorRuntime.dispose();
   }
   return exitCode!;

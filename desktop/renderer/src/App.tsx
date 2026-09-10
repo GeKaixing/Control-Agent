@@ -1,7 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, Globe, Smartphone } from "lucide-react";
 import { useSessionStore } from "./store";
 import { AskUserCard } from "./components/AskUserCard";
+import { BrowserBar } from "./components/BrowserBar";
+import { BrowserTabs } from "./components/BrowserTabs";
+import { PhonePanel } from "./components/PhonePanel";
 import { Composer } from "./components/Composer";
 import { MessageList } from "./components/MessageList";
 import { StatusBar } from "./components/StatusBar";
@@ -25,9 +28,16 @@ export function App({ showComposer = true }: { showComposer?: boolean }): React.
   const notice = useSessionStore((s) => s.notice);
   const sessionTitle = useSessionStore((s) => s.sessionTitle);
   const pendingAsks = useSessionStore((s) => s.pendingAsks);
+  const browser = useSessionStore((s) => s.browser);
+  const phone = useSessionStore((s) => s.phone);
   const handleEvent = useSessionStore((s) => s.handleEvent);
   const setInfo = useSessionStore((s) => s.setInfo);
   const newSession = useSessionStore((s) => s.newSession);
+  const browserOpen = browser?.open === true;
+  const phoneOpen = phone?.open === true;
+  // 工具条 / 地址栏的状态源 = 活动标签页（无标签或未开面板时为 null）
+  const activeBrowserTab =
+    browser !== null ? browser.tabs.find((t) => t.id === browser.activeId) ?? null : null;
 
   useEffect(() => {
     void window.api.info().then(setInfo);
@@ -100,6 +110,8 @@ export function App({ showComposer = true }: { showComposer?: boolean }): React.
 
   // Composer-only 布局：窗口高度自适应内容。根容器不再 h-full（内容高），
   // ResizeObserver 量到高度变化就报给主进程收缩窗口（宽度不变）。
+  // 浏览器面板打开时不做收缩上报：根容器是 100vh，报出去就是视口高，
+  // 会跟「面板最小高度保障」（下方 useEffect）互相打架、还跟最大化抢窗口。
   const rootRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!showComposer) return;
@@ -107,6 +119,7 @@ export function App({ showComposer = true }: { showComposer?: boolean }): React.
     if (el === null) return;
     let last = -1;
     const ro = new ResizeObserver(() => {
+      if (browserOpen || phoneOpen) return;
       const h = Math.ceil(el.getBoundingClientRect().height);
       if (h > 0 && h !== last) {
         last = h;
@@ -115,7 +128,74 @@ export function App({ showComposer = true }: { showComposer?: boolean }): React.
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [showComposer]);
+  }, [showComposer, browserOpen, phoneOpen]);
+
+  // 浏览器面板打开时的窗口高度保障：真实最小内容 = 拖动条 + 标签条 + 工具条 +
+  // Composer + 占位区最小 480。视口不够就把窗口撑大（只撑不缩——用户最大化
+  // 或手动调大时不抢）。Composer 增高（多行输入 / ask_user 卡片）跟着再撑。
+  useEffect(() => {
+    if (!showComposer || !browserOpen) return;
+    const el = rootRef.current;
+    if (el === null) return;
+    const ensureMin = (): void => {
+      let fixed = 0;
+      for (const child of Array.from(el.children)) {
+        if (child === browserHostRef.current) continue;
+        fixed += child.getBoundingClientRect().height;
+      }
+      const needed = Math.ceil(fixed) + 480;
+      if (needed > window.innerHeight) {
+        void window.api.resizeWindow(needed);
+      }
+    };
+    ensureMin();
+    const ro = new ResizeObserver(ensureMin);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [showComposer, browserOpen]);
+
+  // 内部浏览器面板：占位区矩形上报。原生 WebContentsView 由主进程精确贴到
+  // 这个矩形上（CSS px = DIP）。观察占位区自身（窗口缩放 / flex 伸缩）+
+  // 根容器（上方内容高度变化会平移占位区但不一定改变其尺寸）。
+  const browserHostRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!showComposer || !browserOpen) return;
+    const el = browserHostRef.current;
+    if (el === null) return;
+    const report = (): void => {
+      const r = el.getBoundingClientRect();
+      void window.api.browserSetRect({
+        x: r.left,
+        y: r.top,
+        width: r.width,
+        height: r.height,
+      });
+    };
+    report();
+    const ro = new ResizeObserver(report);
+    ro.observe(el);
+    if (el.parentElement !== null) ro.observe(el.parentElement);
+    return () => ro.disconnect();
+  }, [showComposer, browserOpen]);
+
+  const handleToggleBrowser = (): void => {
+    if (browserOpen) {
+      void window.api.browserClose();
+    } else {
+      // 互斥：手机镜像与浏览器面板不共存（原生视图会盖住镜像 DOM 面板；
+      // 反方向的互斥在主进程 PHONE_OPEN 里做）
+      if (phoneOpen) void window.api.phoneClose();
+      void window.api.browserOpen();
+    }
+  };
+
+  const handleTogglePhone = (): void => {
+    if (phoneOpen) {
+      void window.api.phoneClose();
+    } else {
+      void window.api.phoneOpen();
+    }
+  };
 
   // 菜单弹层是独立子窗口（不占主窗口空间）。主窗口内点击非触发区域时收起弹层：
   // 捕获阶段监听，命中 [data-popover-trigger] 的点击交给触发按钮自己 toggle。
@@ -151,7 +231,14 @@ export function App({ showComposer = true }: { showComposer?: boolean }): React.
 
   if (showComposer) {
     return (
-      <div ref={rootRef} className="flex flex-col bg-background text-foreground">
+      <div
+        ref={rootRef}
+        className="flex flex-col bg-background text-foreground"
+        // 浏览器面板打开时根容器撑满视口：面板区 flex-1 吸收剩余空间（窗口
+        // 最大化时面板跟着长高）；关闭时回到内容高度自适应（RO 上报收缩窗口）。
+        // 手机镜像面板同款布局（互斥，二者不同时出现）。
+        style={browserOpen || phoneOpen ? { height: "100vh" } : undefined}
+      >
         {/* 顶部拖动条：无原生标题栏，兼任「会话标题 + 实时状态」栏——
             macOS 左侧留红绿灯位；Windows（WCO）右侧留原生按钮区。
             文字不可选中、不挡拖动。 */}
@@ -181,6 +268,29 @@ export function App({ showComposer = true }: { showComposer?: boolean }): React.
               </span>
             </div>
           )}
+          {/* 内部浏览器面板开关：始终可见（不挂在 sessionTitle 上），
+              开启时高亮。原生视图贴在拖动条下方的占位区上。 */}
+          <button
+            type="button"
+            title={browserOpen ? "关闭浏览器面板" : "打开浏览器面板"}
+            onClick={handleToggleBrowser}
+            className={`shrink-0 transition-colors [-webkit-app-region:no-drag] ${
+              browserOpen ? "text-foreground" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <Globe className="h-3.5 w-3.5" />
+          </button>
+          {/* 手机镜像面板开关（Mobile 控制通道入口）：与 Globe 并排，同款交互 */}
+          <button
+            type="button"
+            title={phoneOpen ? "关闭手机镜像面板" : "打开手机镜像面板"}
+            onClick={handleTogglePhone}
+            className={`shrink-0 transition-colors [-webkit-app-region:no-drag] ${
+              phoneOpen ? "text-foreground" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <Smartphone className="h-3.5 w-3.5" />
+          </button>
           {sessionTitle !== null && sessionTitle.length > 0 && (
             <button
               type="button"
@@ -204,6 +314,21 @@ export function App({ showComposer = true }: { showComposer?: boolean }): React.
             ))}
           </div>
         )}
+        {/* 内部浏览器面板：标签条 + 工具条 + 占位区（原生 WebContentsView 贴在
+            占位区上，占位区本身只兜底显示底色）。Composer 留在底部——边聊边看两不误。 */}
+        {browserOpen && browser !== null && (
+          <>
+            <BrowserTabs browser={browser} />
+            <BrowserBar tab={activeBrowserTab} />
+            <div
+              ref={browserHostRef}
+              className="min-h-[480px] flex-1 bg-muted"
+              title="浏览器区域"
+            />
+          </>
+        )}
+        {/* 手机镜像面板：帧 + 手势都在渲染层（主进程 adb 桥推流），与浏览器面板互斥 */}
+        {phoneOpen && <PhonePanel />}
         {/* 不留消息区空白：Composer 直接贴在拖动条下方，窗口高度=内容高度 */}
         <Composer
           status={status}

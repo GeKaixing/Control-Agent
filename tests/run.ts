@@ -35,9 +35,11 @@ import {
   pathToRoot,
   readSavedCustomModel,
   readSavedModelSpec,
+  readSavedWorkspaceCwd,
   saveCustomModel,
   saveModelSpec,
   saveSession,
+  saveWorkspaceCwd,
   sessionFileExists,
   sessionsDir,
   shouldAutoCompact,
@@ -55,7 +57,7 @@ import {
   resolveModel,
 } from "../src/providers/index.js";
 import type { StreamEvent, StreamFn, StreamOptions } from "../src/providers/types.js";
-import { allTools, askUserTool, setAskUserHandler, bashTool, editTool, globTool, grepTool, readTool, resolveShell, writeTool, type ToolName } from "../src/tools/index.js";
+import { allTools, askUserTool, setAskUserHandler, bashTool, browserEvaluateTool, browserInputTool, browserInterceptTool, browserNavigateTool, browserNetworkTool, browserReadTool, browserScreenshotTool, browserTabsTool, browserWaitTool, editTool, globTool, grepTool, readTool, resolveShell, setBrowserBackend, writeTool, type BrowserBackend, type ToolName } from "../src/tools/index.js";
 import type { Tool } from "../src/tools/types.js";
 import { ok } from "../src/tools/types.js";
 import { globToRegExp, matchesGlob } from "../src/tools/glob-matcher.js";
@@ -91,6 +93,7 @@ import "./ws-bridge.js";
 import "./bot-runner.js";
 import "./bot-weixin.js";
 import "./log.js";
+import "./cron.js";
 
 const noSignal = (): AbortSignal => new AbortController().signal;
 
@@ -328,7 +331,338 @@ test("ask_user: 自由文本透传；abort 与 EOF 走中断", async () => {
   }
 });
 
-// -------------------------------------------------------- glob / grep
+// ---------------------------------------------------------------- browser_*
+
+/** BrowserBackend 的全默认 fake：测试按需覆写关心的方法即可 */
+function makeFakeBackend(overrides: Partial<BrowserBackend> = {}): BrowserBackend {
+  return {
+    async open() {},
+    async navigate() {},
+    async read() {
+      return { url: "", title: "", text: "" };
+    },
+    async screenshot() {
+      return { dataUrl: "data:image/jpeg;base64,AA", width: 1, height: 1 };
+    },
+    async evaluate() {
+      return "";
+    },
+    async dispatchInput() {},
+    async networkStart() {},
+    async networkStop() {},
+    async networkList() {
+      return [];
+    },
+    async networkBody() {
+      return { mimeType: "application/json", body: "{}", binary: false };
+    },
+    async tabsList() {
+      return [];
+    },
+    async tabsNew() {
+      return "tab_fake";
+    },
+    async tabsSwitch() {},
+    async tabsClose() {},
+    async wait() {
+      return "页面加载完成";
+    },
+    async networkIntercept() {},
+    ...overrides,
+  };
+}
+
+test("browser_*: 未注入后端时优雅失败并给出替代方案指引", async () => {
+  setBrowserBackend(null);
+  const ctx = { cwd: ".", signal: noSignal() };
+  const nav = await browserNavigateTool.execute({ url: "https://example.com" }, ctx);
+  assert.equal(nav.isError, true);
+  assert.match(resultText(nav.content), /桌面端/);
+  assert.match(resultText(nav.content), /curl/);
+  const read = await browserReadTool.execute({}, ctx);
+  const shot = await browserScreenshotTool.execute({}, ctx);
+  const ev = await browserEvaluateTool.execute({ expression: "1+1" }, ctx);
+  for (const r of [read, shot, ev]) {
+    assert.equal(r.isError, true);
+    assert.match(resultText(r.content), /桌面端/);
+  }
+});
+
+test("browser_*: 注入 fake 后端后走完整链路（navigate/read/evaluate/截图）", async () => {
+  const calls: string[] = [];
+  setBrowserBackend(makeFakeBackend({
+    async open(url?: string) {
+      calls.push(`open:${url ?? ""}`);
+    },
+    async navigate(input: string) {
+      calls.push(`navigate:${input}`);
+    },
+    async read() {
+      return { url: "https://example.com/", title: "示例", text: "Hello Example Domain" };
+    },
+    async screenshot() {
+      return { dataUrl: "data:image/jpeg;base64,AAAA", width: 640, height: 480 };
+    },
+    async evaluate(expression: string) {
+      calls.push(`evaluate:${expression}`);
+      if (expression === "throw") throw new Error("面板未打开");
+      // 与真后端一致：JSON.stringify(result, null, 1)
+      return JSON.stringify({ ok: true, n: 42 }, null, 1);
+    },
+  }));
+  try {
+    const ctx = { cwd: ".", signal: noSignal() };
+    const nav = await browserNavigateTool.execute({ url: "https://example.com" }, ctx);
+    assert.equal(nav.isError, false);
+    assert.match(resultText(nav.content), /example\.com/);
+    assert.ok(calls.includes("navigate:https://example.com"));
+
+    // 后端抛「面板未打开」→ 工具层转成「先调 browser_navigate」的可执行提示
+    const evFail = await browserEvaluateTool.execute({ expression: "throw" }, ctx);
+    assert.equal(evFail.isError, true);
+    assert.match(resultText(evFail.content), /browser_navigate/);
+
+    // evaluate 对象结果按 JSON 序列化
+    const ev = await browserEvaluateTool.execute({ expression: "({ok:true,n:42})" }, ctx);
+    assert.equal(ev.isError, false);
+    assert.match(resultText(ev.content), /"n": 42/);
+
+    const read = await browserReadTool.execute({}, ctx);
+    assert.equal(read.isError, false);
+    assert.match(resultText(read.content), /Hello Example Domain/);
+
+    const shot = await browserScreenshotTool.execute({}, ctx);
+    assert.equal(shot.isError, false);
+    const image = shot.content.find((c) => c.type === "image");
+    assert.ok(image !== undefined && image.dataUrl.startsWith("data:image/jpeg"));
+  } finally {
+    setBrowserBackend(null);
+  }
+});
+
+test("browser_evaluate: 空 expression 拒绝；browser_navigate 缺 url 只开面板", async () => {
+  const ctx = { cwd: ".", signal: noSignal() };
+  const callsLog: string[] = [];
+  setBrowserBackend(makeFakeBackend({
+    async open(url?: string) {
+      callsLog.push(`open:${url ?? ""}`);
+    },
+  }));
+  try {
+    const empty = await browserEvaluateTool.execute({ expression: "  " }, ctx);
+    assert.equal(empty.isError, true);
+    assert.match(resultText(empty.content), /expression/);
+
+    const openOnly = await browserNavigateTool.execute({}, ctx);
+    assert.equal(openOnly.isError, false);
+    assert.deepEqual(callsLog, ["open:"]);
+  } finally {
+    setBrowserBackend(null);
+  }
+});
+
+test("browser_input: 缺坐标/缺文本快速失败；完整参数透传后端", async () => {
+  const ctx = { cwd: ".", signal: noSignal() };
+  const received: unknown[] = [];
+  setBrowserBackend(makeFakeBackend({
+    async dispatchInput(spec) {
+      received.push(spec);
+    },
+  }));
+  try {
+    // click 缺 x/y → fail 且带补救提示
+    const noXY = await browserInputTool.execute({ action: "click" }, ctx);
+    assert.equal(noXY.isError, true);
+    assert.match(resultText(noXY.content), /browser_screenshot/);
+    // type 缺 text → fail
+    const noText = await browserInputTool.execute({ action: "type" }, ctx);
+    assert.equal(noText.isError, true);
+    assert.match(resultText(noText.content), /text/);
+    // 完整参数 → 透传后端（含修饰键）
+    const okClick = await browserInputTool.execute(
+      { action: "click", x: 100, y: 200, modifiers: ["ctrl"] }, ctx,
+    );
+    assert.equal(okClick.isError, false);
+    const okType = await browserInputTool.execute(
+      { action: "type", text: "你好", delayMs: 30 }, ctx,
+    );
+    assert.equal(okType.isError, false);
+    assert.equal(received.length, 2);
+    assert.deepEqual((received[0] as { modifiers?: string[] }).modifiers, ["ctrl"]);
+    assert.equal((received[1] as { text?: string }).text, "你好");
+  } finally {
+    setBrowserBackend(null);
+  }
+});
+
+test("browser_network: start→list（urlFilter/limit）→body 二进制占位；body 缺 requestId 拒绝", async () => {
+  const ctx = { cwd: ".", signal: noSignal() };
+  let started = false;
+  setBrowserBackend(makeFakeBackend({
+    async networkStart() {
+      started = true;
+    },
+    async networkStop() {
+      started = false;
+    },
+    async networkList() {
+      return [
+        { requestId: "r1", url: "https://api.example.com/v1/data", method: "GET", status: 200, mimeType: "application/json", size: 120 },
+        { requestId: "r2", url: "https://cdn.example.com/img.png", method: "GET", status: 200, mimeType: "image/png", size: 4096 },
+      ];
+    },
+    async networkBody(requestId: string) {
+      if (requestId === "r1") return { mimeType: "application/json", body: '{"ok":true}', binary: false };
+      return { mimeType: "image/png", body: "", binary: true, size: 4096 };
+    },
+  }));
+  try {
+    const start = await browserNetworkTool.execute({ mode: "start" }, ctx);
+    assert.equal(start.isError, false);
+    assert.equal(started, true);
+
+    // list + urlFilter
+    const list = await browserNetworkTool.execute({ mode: "list", urlFilter: "api." }, ctx);
+    assert.equal(list.isError, false);
+    const listText = resultText(list.content);
+    assert.match(listText, /\/v1\/data/);
+    assert.doesNotMatch(listText, /img\.png/);
+    assert.match(listText, /id=r1/);
+
+    // body：JSON 直出
+    const body = await browserNetworkTool.execute({ mode: "body", requestId: "r1" }, ctx);
+    assert.match(resultText(body.content), /\{"ok":true\}/);
+    // body：二进制给占位 + 指路 evaluate
+    const bin = await browserNetworkTool.execute({ mode: "body", requestId: "r2" }, ctx);
+    assert.match(resultText(bin.content), /二进制/);
+    assert.match(resultText(bin.content), /browser_evaluate/);
+    // body 缺 requestId → fail
+    const noId = await browserNetworkTool.execute({ mode: "body" }, ctx);
+    assert.equal(noId.isError, true);
+    assert.match(resultText(noId.content), /requestId/);
+
+    const stop = await browserNetworkTool.execute({ mode: "stop" }, ctx);
+    assert.equal(stop.isError, false);
+    assert.equal(started, false);
+  } finally {
+    setBrowserBackend(null);
+  }
+});
+
+test("browser_tabs: list 展示活动标记；switch/close 缺 id 拒绝；new/switch/close 透传后端", async () => {
+  const ctx = { cwd: ".", signal: noSignal() };
+  const log: string[] = [];
+  setBrowserBackend(makeFakeBackend({
+    async tabsList() {
+      return [
+        { id: "tab_a", title: "第一个", url: "https://a.com", active: true, loading: false },
+        { id: "tab_b", title: "", url: "", active: false, loading: true },
+      ];
+    },
+    async tabsNew(url?: string) {
+      log.push(`new:${url ?? ""}`);
+      return "tab_c";
+    },
+    async tabsSwitch(id: string) {
+      log.push(`switch:${id}`);
+    },
+    async tabsClose(id: string) {
+      log.push(`close:${id}`);
+    },
+  }));
+  try {
+    const list = await browserTabsTool.execute({}, ctx);
+    assert.equal(list.isError, false);
+    const listText = resultText(list.content);
+    assert.match(listText, /tab_a/);
+    assert.match(listText, /\*/); // 活动标记
+    assert.match(listText, /加载中/);
+
+    const created = await browserTabsTool.execute({ action: "new", url: "https://b.com" }, ctx);
+    assert.equal(created.isError, false);
+    assert.match(resultText(created.content), /tab_c/);
+
+    const switched = await browserTabsTool.execute({ action: "switch", id: "tab_a" }, ctx);
+    assert.equal(switched.isError, false);
+    const closed = await browserTabsTool.execute({ action: "close", id: "tab_b" }, ctx);
+    assert.equal(closed.isError, false);
+    assert.deepEqual(log, ["new:https://b.com", "switch:tab_a", "close:tab_b"]);
+
+    // switch / close 缺 id → fail 带补救提示
+    const noIdSwitch = await browserTabsTool.execute({ action: "switch" }, ctx);
+    assert.equal(noIdSwitch.isError, true);
+    assert.match(resultText(noIdSwitch.content), /id/);
+    const noIdClose = await browserTabsTool.execute({ action: "close" }, ctx);
+    assert.equal(noIdClose.isError, true);
+    assert.match(resultText(noIdClose.content), /id/);
+  } finally {
+    setBrowserBackend(null);
+  }
+});
+
+test("browser_wait: 缺省等加载；selector 透传；超时错误透出", async () => {
+  const ctx = { cwd: ".", signal: noSignal() };
+  const received: unknown[] = [];
+  setBrowserBackend(makeFakeBackend({
+    async wait(spec) {
+      received.push(spec);
+      if (spec.selector === "#never") throw new Error("等待超时（1000ms）：选择器未出现：#never");
+      return "页面加载完成";
+    },
+  }));
+  try {
+    // 什么都不给 → 缺省 load=true
+    const def = await browserWaitTool.execute({}, ctx);
+    assert.equal(def.isError, false);
+    assert.equal((received[0] as { load?: boolean }).load, true);
+
+    const sel = await browserWaitTool.execute({ selector: "#result", networkIdleMs: 500 }, ctx);
+    assert.equal(sel.isError, false);
+    assert.equal((received[1] as { selector?: string }).selector, "#result");
+    assert.equal((received[1] as { networkIdleMs?: number }).networkIdleMs, 500);
+
+    const timeout = await browserWaitTool.execute({ selector: "#never", timeoutMs: 1000 }, ctx);
+    assert.equal(timeout.isError, true);
+    assert.match(resultText(timeout.content), /超时/);
+  } finally {
+    setBrowserBackend(null);
+  }
+});
+
+test("browser_intercept: 缺 urlPattern/action 拒绝；合法规则透传；clear 清空", async () => {
+  const ctx = { cwd: ".", signal: noSignal() };
+  const rulesSeen: unknown[] = [];
+  setBrowserBackend(makeFakeBackend({
+    async networkIntercept(rules) {
+      rulesSeen.push(rules);
+    },
+  }));
+  try {
+    const noPattern = await browserInterceptTool.execute({ action: "block" }, ctx);
+    assert.equal(noPattern.isError, true);
+    assert.match(resultText(noPattern.content), /urlPattern/);
+
+    const badAction = await browserInterceptTool.execute({ urlPattern: "*ads*", action: "noop" }, ctx);
+    assert.equal(badAction.isError, true);
+    assert.match(resultText(badAction.content), /action/);
+
+    const okBlock = await browserInterceptTool.execute({ urlPattern: "*tracker*", action: "block" }, ctx);
+    assert.equal(okBlock.isError, false);
+    assert.deepEqual(rulesSeen[0], [{ urlPattern: "*tracker*", action: "block", status: undefined, body: undefined, contentType: undefined }]);
+
+    const okFulfill = await browserInterceptTool.execute(
+      { urlPattern: "https://api.example.com/v1/*", action: "fulfill", status: 200, body: '{"mock":true}', contentType: "application/json" }, ctx,
+    );
+    assert.equal(okFulfill.isError, false);
+    assert.equal((rulesSeen[1] as Array<{ body?: string }>)[0]?.body, '{"mock":true}');
+
+    const cleared = await browserInterceptTool.execute({ mode: "clear" }, ctx);
+    assert.equal(cleared.isError, false);
+    assert.deepEqual(rulesSeen[2], []);
+  } finally {
+    setBrowserBackend(null);
+  }
+});
 
 test("glob / grep 工具在真实目录上工作", async () => {
   const dir = await tempDir();
@@ -2510,6 +2844,41 @@ test("setAlwaysOnTop：窗口置顶默认不开启，开关回显 info", () => {
   assert.equal(sm.info().alwaysOnTop, false);
 });
 
+test("setWorkspaceCwd：改写所有会话 state.cwd + 落盘钩子触发；空目录拒绝", async () => {
+  const dir = await tempDir();
+  const state = createInitialState({
+    cwd: process.cwd(),
+    model: { provider: "openai", id: "gpt-4o-mini" },
+    tools: [],
+  });
+  const persisted: string[] = [];
+  const sm = new SessionManager(
+    { state, queue: new MessageQueue(), resolved: { model: { provider: "openai", id: "gpt-4o-mini" }, stream: createMockStream({ delayMs: 0 }) } },
+    {
+      emit: () => {},
+      cwd: () => state.cwd,
+      persistWorkspaceCwd: (d) => persisted.push(d),
+    },
+  );
+  sm.newSession(); // 造第二个会话，验证归档会话的 cwd 也被统一改写
+
+  const blank = sm.setWorkspaceCwd("   ");
+  assert.equal(blank.ok, false, "空白目录拒绝");
+  assert.equal(blank.error, "目录不能为空");
+
+  const target = path.join(dir, "ws");
+  const r = sm.setWorkspaceCwd(target);
+  assert.equal(r.ok, true);
+  assert.equal(sm.info().cwd, target, "当前会话 state.cwd 已切换");
+  assert.equal(state.cwd, target, "共享的 state 对象本身被改写（工具解析相对路径用）");
+  sm.switchSession(-1);
+  assert.equal(sm.info().cwd, target, "归档会话的 cwd 也统一改写");
+  sm.switchSession(1);
+  assert.deepEqual(persisted, [target], "落盘钩子收到新目录（写 config.json 的 cwd 字段）");
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 test("setCustomModel：anthropic / gemini 协议直接构造对应 provider", () => {
   const state = createInitialState({
     cwd: process.cwd(),
@@ -3713,6 +4082,39 @@ test("config: saveModelSpec / readSavedModelSpec 往返，覆盖写", async () =
 
   await saveModelSpec(dir, "opencode:glm-5.3:strong");
   assert.equal(await readSavedModelSpec(dir), "opencode:glm-5.3:strong", "第二次保存覆盖第一次");
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("config: saveWorkspaceCwd 写入 / 清除，且不抹掉模型配置", async () => {
+  const dir = await tempDir();
+  assert.equal(await readSavedWorkspaceCwd(dir), null, "无配置文件 → null（走缺省工作区）");
+
+  // 有模型配置时写 cwd：模型字段保留，cwd 落账
+  await saveModelSpec(dir, "opencode:glm-5.3");
+  await saveWorkspaceCwd(dir, "C:\\proj\\demo");
+  assert.equal(await readSavedWorkspaceCwd(dir), "C:\\proj\\demo");
+  assert.equal(await readSavedModelSpec(dir), "opencode:glm-5.3", "写 cwd 不抹掉模型 spec");
+
+  // 覆盖写 + 首尾空白裁剪
+  await saveWorkspaceCwd(dir, "  D:\\workspace2  ");
+  assert.equal(await readSavedWorkspaceCwd(dir), "D:\\workspace2");
+
+  // null = 清除覆写，回到缺省；模型配置仍在
+  await saveWorkspaceCwd(dir, null);
+  assert.equal(await readSavedWorkspaceCwd(dir), null, "null 清除 cwd 覆写");
+  assert.equal(await readSavedModelSpec(dir), "opencode:glm-5.3");
+
+  // customModel 版同理不被抹
+  await saveCustomModel(dir, {
+    provider: "openai",
+    id: "deepseek-chat",
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "EMPTY",
+  });
+  await saveWorkspaceCwd(dir, "E:\\third");
+  const back = await readSavedCustomModel(dir);
+  assert.notEqual(back, null, "写 cwd 不抹掉 customModel");
 
   await fs.rm(dir, { recursive: true, force: true });
 });

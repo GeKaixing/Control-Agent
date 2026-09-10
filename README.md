@@ -159,6 +159,7 @@ src/
     stream.ts        流式事件累积成完整消息
     openai.ts  anthropic.ts  mock.ts
   tools/             read / write / edit / bash / glob / grep / memory（跨会话记忆）
+  cron/              定时任务：5 字段 cron 解析 / jobs.json 持久化 / 轮询调度 / 无头执行（详见 src/cron/doc/README.md）
   ui/                renderer（交互）· print（非交互）· input（readline）· repl（REPL 主循环，可被测试注入 FakeInput）
 tests/
   run.ts              零依赖运行器入口；编排 + 直接 import 内部模块的单元/集成测试

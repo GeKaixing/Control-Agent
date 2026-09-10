@@ -111,6 +111,11 @@ export interface SessionDeps {
    * 早期版本「自定义模型不落盘」是错的：那正是用户重启后配置全丢的原因。
    */
   persistCustomModel?: (custom: StoredCustomModel) => void;
+  /**
+   * 工作目录变更后的持久化钩子：主进程注入（写 config.json 的 cwd 字段）。
+   * 触发点：setWorkspaceCwd 成功后。缺省 noop——单测不落盘。
+   */
+  persistWorkspaceCwd?: (dir: string) => void;
 }
 
 // ────────────── 动态模型列表（可配置） ──────────────
@@ -467,8 +472,8 @@ export class SessionManager {
   // ────────────── Permission：审批模式 ──────────────
   /** 审批模式开关：mutating 工具执行前逐次询问用户 */
   private approvalMode = false;
-  /** 「本会话全部允许」记忆：用户在弹窗里选过一次全部允许后置 true */
-  private approvalAlways = false;
+  /** 「本会话允许」记忆：用户在弹窗里选过一次后，该工具本会话内不再询问（按工具粒度） */
+  private approvalAlwaysTools = new Set<string>();
   /** 审批请求自增序号（WireEvent id 用） */
   private approvalSeq = 0;
 
@@ -511,8 +516,8 @@ export class SessionManager {
    */
   private sessions: AssembledSession["state"][] = [];
   private sessionIdx = 0;
-  /** 每个会话各自的 plan review 状态（切走再切回不丢）+ 审批「全部允许」授权 */
-  private sessionMeta: Array<{ planPending: boolean; planRound: number; approvalAlways: boolean }> = [];
+  /** 每个会话各自的 plan review 状态（切走再切回不丢）+ 审批「本会话允许」的工具清单 */
+  private sessionMeta: Array<{ planPending: boolean; planRound: number; approvalAlwaysTools: string[] }> = [];
   /**
    * 每个会话的标题：第一条用户消息生成（截前 24 个字符），还没发过消息就是「新会话」。
    * 与 sessions / sessionMeta 平行维护；info() 下发给渲染层显示在标题栏。
@@ -535,7 +540,7 @@ export class SessionManager {
     // 把 reasoning 档位落到 thinkingLevel（auto/fast→low，balanced→medium，ultra→high）
     this.state.thinkingLevel = thinkingLevelFor(this.reasoning);
     this.sessions = [assembled.state];
-    this.sessionMeta = [{ planPending: false, planRound: 0, approvalAlways: false }];
+    this.sessionMeta = [{ planPending: false, planRound: 0, approvalAlwaysTools: [] }];
     this.sessionTitles = ["新会话"];
     this.sessionTitleLocked = [false];
     this.queue = assembled.queue;
@@ -553,6 +558,9 @@ export class SessionManager {
       ...(deps.persistModel !== undefined ? { persistModel: deps.persistModel } : {}),
       ...(deps.persistCustomModel !== undefined
         ? { persistCustomModel: deps.persistCustomModel }
+        : {}),
+      ...(deps.persistWorkspaceCwd !== undefined
+        ? { persistWorkspaceCwd: deps.persistWorkspaceCwd }
         : {}),
     };
 
@@ -814,12 +822,12 @@ export class SessionManager {
   }
 
   /**
-   * 切换审批模式。关闭时清掉「全部允许」记忆（重新开启不该继承旧授权）。
+   * 切换审批模式。关闭时清掉「本会话允许」记忆（重新开启不该继承旧授权）。
    * 对正在跑的 Agent 立即生效：gate 每次调用都实时读开关。
    */
   setApprovalMode(on: boolean): void {
     this.approvalMode = on;
-    if (!on) this.approvalAlways = false;
+    if (!on) this.approvalAlwaysTools.clear();
   }
 
   /**
@@ -847,8 +855,29 @@ export class SessionManager {
   }
 
   /**
+   * 切换会话工作目录（设置弹窗「工作目录」行）：立即生效——所有会话状态
+   * （含归档的）的 state.cwd 统一改写，工具的相对路径解析、审批详情、
+   * @ 引用文件列表随 info.cwd 一起跟上。目录的可创建性由调用方
+   * （index.ts 的 IPC handler）先行 mkdir 校验，这里只做纯逻辑。
+   * 互斥保护：Agent 正在跑时拒绝（跑一半换 cwd 会让进行中的工具调用
+   * 前后落在两个目录，产物错乱）。
+   */
+  setWorkspaceCwd(dir: string): { ok: boolean; error?: string } {
+    const trimmed = dir.trim();
+    if (trimmed.length === 0) return { ok: false, error: "目录不能为空" };
+    if (this.isRunning) {
+      return { ok: false, error: "当前有任务在跑，请先等它完成或中断后再切换工作目录" };
+    }
+    for (const s of this.sessions) {
+      s.cwd = trimmed;
+    }
+    this.deps.persistWorkspaceCwd?.(trimmed);
+    return { ok: true };
+  }
+
+  /**
    * Permission 支柱：Agent.approvalGate 的实现。
-   * approvalMode 关闭 / 用户选过「本会话全部允许」→ 直接放行；
+   * approvalMode 关闭 / 该工具被用户选过「本会话允许」→ 直接放行；
    * 否则发 approval_request 事件并等审批弹窗（deps.approvalPrompt，缺省 deny），
    * 结果以 approval_done + notice 广播（remote-ui 等无弹窗显示端可见）。
    */
@@ -856,7 +885,7 @@ export class SessionManager {
     toolName: string;
     arguments: Record<string, unknown>;
   }): Promise<boolean> {
-    if (!this.approvalMode || this.approvalAlways) return true;
+    if (!this.approvalMode || this.approvalAlwaysTools.has(req.toolName)) return true;
     const argsText = buildApprovalDetail({ toolName: req.toolName, args: req.arguments, cwd: this.deps.cwd() });
     const id = `ap_${++this.approvalSeq}`;
     this.deps.emit({ t: "approval_request", id, toolName: req.toolName, args: argsText });
@@ -871,12 +900,12 @@ export class SessionManager {
     }
 
     const allow = verdict !== "deny";
-    if (verdict === "always") this.approvalAlways = true;
+    if (verdict === "always") this.approvalAlwaysTools.add(req.toolName);
     this.deps.emit({ t: "approval_done", id, allow });
     // SessionSignal 没有 notice 变体——走 AgentEvent 形状（autopilot 收工同款）
     this.deps.emit({
       type: "notice",
-      message: `[审批] ${allow ? "✓ 允许" : "✗ 拒绝"} ${req.toolName}${verdict === "always" ? "（本会话后续不再询问）" : ""}`,
+      message: `[审批] ${allow ? "✓ 允许" : "✗ 拒绝"} ${req.toolName}${verdict === "always" ? `（本会话内 ${req.toolName} 不再询问）` : ""}`,
     });
     return allow;
   }
@@ -1069,17 +1098,17 @@ export class SessionManager {
     this.sessionMeta[this.sessionIdx] = {
       planPending: this.planPending,
       planRound: this.planRound,
-      approvalAlways: this.approvalAlways,
+      approvalAlwaysTools: [...this.approvalAlwaysTools],
     };
     this.sessions.push(emptyStateLike(this.state));
     this.sessionIdx = this.sessions.length - 1;
     this.state = this.sessions[this.sessionIdx]!;
-    this.sessionMeta.push({ planPending: false, planRound: 0, approvalAlways: false });
+    this.sessionMeta.push({ planPending: false, planRound: 0, approvalAlwaysTools: [] });
     this.sessionTitles.push("新会话");
     this.sessionTitleLocked.push(false);
     this.planPending = false;
     this.planRound = 0;
-    this.approvalAlways = false; // 新会话不继承「全部允许」授权
+    this.approvalAlwaysTools.clear(); // 新会话不继承「本会话允许」授权
     this.resetTransients();
   }
 
@@ -1112,15 +1141,15 @@ export class SessionManager {
     this.sessionMeta[this.sessionIdx] = {
       planPending: this.planPending,
       planRound: this.planRound,
-      approvalAlways: this.approvalAlways,
+      approvalAlwaysTools: [...this.approvalAlwaysTools],
     };
     this.currentAgent?.abort("user_aborted");
     this.sessionIdx = next;
     this.state = this.sessions[next]!;
-    const meta = this.sessionMeta[next] ?? { planPending: false, planRound: 0, approvalAlways: false };
+    const meta = this.sessionMeta[next] ?? { planPending: false, planRound: 0, approvalAlwaysTools: [] };
     this.planPending = meta.planPending;
     this.planRound = meta.planRound;
-    this.approvalAlways = meta.approvalAlways;
+    this.approvalAlwaysTools = new Set(meta.approvalAlwaysTools);
     this.resetTransients();
   }
 

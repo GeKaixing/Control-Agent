@@ -49,6 +49,7 @@ export {
   saveCustomModel,
   saveModelSpec,
   saveSession,
+  saveWorkspaceCwd,
   sessionFileExists,
   sessionsDir,
   type StoredCustomModel,

@@ -1,4 +1,4 @@
-# tools/ —— 10 个内置工具
+# tools/ —— 19 个内置工具
 
 **关注点**：把模型能调用的「动作」都收口在这里。模型看到的是 `LlmTool[]`（带 JSON Schema
 签名），执行时拿到的是 `Tool.execute(args, ctx)` 的统一签名。每个工具都标 `isMutating`
@@ -16,13 +16,14 @@
 | `read.ts` | ~? | 读文件 + 自动截断（默认 `maxBytes` 2MB，行数 + 行宽双重截断） |
 | `write.ts` | ~? | 写文件；需要时自动 `mkdir -p` |
 | `edit.ts` | ~? | 精确替换（oldString / newString，含全局替换选项） |
-| `bash.ts` | ~? | 执行 shell；超时默认 120s、上限 600s；输出按 `MAX_OUTPUT_CHARS` 截断；`isMutating: true` |
+| `bash.ts` | ~? | 执行 shell；超时默认 120s、上限 600s；输出按 `MAX_OUTPUT_CHARS` 截断；灾难命令护栏（POSIX + Windows 双套模式，`CAGENT_ALLOW_DANGEROUS=1` 整体关闭）；`isMutating: true` |
 | `glob.ts` | ~? | 走 `fs-utils.walk` 的 glob 匹配 |
 | `grep.ts` | ~? | 走 `parseSse` 类似的字节流解析，最终落到 ripgrep 后端 |
 | `memory.ts` | ~? | 跨会话记忆：append（带时间戳追加到项目根 `MEMORY.md`）/ read（读回，保留尾部 8K）；注入端在 `session.ts` 的 `collectProjectMemory` |
 | `screenshot.ts` | ~110 | Computer Use 感知端：PowerShell + System.Drawing 截全虚拟屏 → JPEG dataUrl（Windows only，零 npm 依赖）；`isMutating: false` |
-| `computer.ts` | ~230 | Computer Use 执行端：鼠标点击/双击/右键、type（剪贴板粘贴）、hotkey（SendKeys 映射）、scroll；坐标取自 screenshot 图片，内部加虚拟屏偏移换算；Windows only；`isMutating: true` |
+| `computer.ts` | ~300 | Computer Use 执行端：鼠标点击/双击/右键、type（剪贴板粘贴）、hotkey（SendKeys 映射）、scroll、drag（插值拖拽）、focus（激活窗口）；坐标取自 screenshot 图片，内部加虚拟屏偏移换算；Windows（PowerShell + user32）与 macOS（darwin-cu.ts）双后端；`isMutating: true` |
 | `ask-user.ts` | ~110 | 模型 → 用户的结构化提问通道：问题 + 可选选项，答案作为 toolResult 回灌。端点经 `setAskUserHandler()` 注入实现（REPL 借 `LoopInput.ask()` 抓下一行）；未注入时优雅 fail 并引导模型自行兜底；`isMutating: false` |
+| `browser.ts` | ~430 | browser_* 工具族（9 个）：agent 操控桌面端内部浏览器面板（导航/读取/截图/evaluate/受信输入/网络抓包）。端点经 `setBrowserBackend()` 注入控制器（实现体在 `desktop/main/browser-view.ts`）；CLI 端不注入优雅 fail |
 
 ## `Tool` 接口
 
@@ -66,6 +67,15 @@ function fail(text: string): ToolResult;
 | `screenshot` | 截屏（Computer Use 感知） | false | 无参数；返回 JPEG + 尺寸 + 虚拟屏原点 |
 | `computer` | 鼠标键盘（Computer Use 执行） | true | `action`(click/doubleClick/rightClick/type/hotkey/scroll), `x?`, `y?`, `content?`, `keys?`, `direction?`, `amount?` |
 | `ask_user` | 向用户提问并等答案 | false | `question`, `choices?`（2-4 个候选，用户仍可自由输入） |
+| `browser_navigate` | 打开/导航内部浏览器面板 | false | `url?`（像 URL 直开、像搜索词走 Bing；缺省只开面板） |
+| `browser_read` | 读面板当前页面文本 | false | 无参数；URL + 标题 + body.innerText（2 万字符截断） |
+| `browser_screenshot` | 截面板画面 | false | `fullPage?`（true 走 CDP captureBeyondViewport 截整页）；JPEG + 尺寸，坐标语义同 screenshot |
+| `browser_evaluate` | 页面主 frame 执行任意 JS | true | `expression`（可 await；对象结果 JSON 序列化） |
+| `browser_input` | 派发受信输入事件（isTrusted=true） | true | `action`（click/dblclick/rightclick/move/type/key/scroll）+ `x/y`、`text/key`、`dx/dy`、`delayMs?`、`modifiers?`；坐标与截图同坐标系 |
+| `browser_network` | 观察页面网络流量（CDP Network 域） | false | `mode`（start/stop/list/body）+ `requestId?`、`urlFilter?`、`limit?`；list 出 URL/方法/状态/大小，body 读响应体 |
+| `browser_tabs` | 多标签管理（list/new/switch/close） | true | `action`（list 缺省）+ `id?`（switch/close 必填）、`url?`（new）；browser_* 其余工具作用于活动标签 |
+| `browser_wait` | 等待条件满足（替代盲轮询） | false | `load?`、`selector?`、`networkIdleMs?`、`timeoutMs?`（可组合，缺省等加载完成） |
+| `browser_intercept` | 拦截/改写页面网络请求（CDP Fetch 域） | true | `urlPattern`（* 通配）+ `action`（block/fulfill）+ `status?/body?/contentType?`、`mode?`（set 缺省/clear）；规则累积生效 |
 
 ### ask_user 通道注入约定
 
@@ -87,6 +97,30 @@ function fail(text: string): ToolResult;
 - **不走 approvalGate**：提问本身就是知情同意机制，`isMutating: false`，
   桌面端不要再给它套审批弹窗（会双重弹窗）。
 
+### browser_* 通道注入约定（2026-09-10）
+
+- **面板是端点能力**：只有 Electron 桌面端有内部浏览器面板（`desktop/main/browser-view.ts`
+  的 WebContentsView），main 进程与 Agent 同进程，启动时 `setBrowserBackend()` 注入；
+  CLI / print / bot 不注入 → 优雅 fail，提示改用 read/curl。后端闭包实时读当前面板，
+  面板开关多次无需重注。
+- **与 Computer Use 的分工**：面板内优先结构化操作（browser_evaluate 精确选元素、
+  token 便宜）；只有视觉渲染效果（canvas/样式）用 browser_screenshot 看，真实鼠标
+  轨迹（hover 悬浮菜单）才用 computer 对屏幕坐标操作。
+- **CDP 能力（2026-09-10 续）**：受信输入（Input 域）、网络抓包（Network 域）、请求拦截/伪造（Fetch 域，
+  `Fetch.requestPaused` → continueRequest / failRequest / fulfillRequest，规则按标签页隔离）、全页截图
+  （Page.captureScreenshot captureBeyondViewport）经 Electron 内置 `webContents.debugger`
+  实现——进程内 attach，**绝不开 `--remote-debugging-port`**（本机任意进程都能连，
+  等于把登录态 cookie 和浏览器控制权暴露给所有本地进程，安全红线）。attach 一次常驻，
+  detach 事件里收尾（netEnabled=false），view 重建时清记录。
+- **权限边界**：navigate / read / screenshot / network 只读（`isMutating: false`）；
+  browser_evaluate `isMutating: true`——等价于以页面身份做事（可点击/提交表单），
+  桌面端过 approvalGate。用户定调 agent 拥有面板的完整操控权限，CLI 端无审批门。
+- **边界**：evaluate 只作用于页面主 frame，跨域 iframe 内部访问不到（CDP 网络抓包同样
+  抓不到跨进程 iframe 的流量）；browser_input 的 type 逐字符 keyDown/keyUp（触发页面
+  keydown 监听），key 支持具名键 + 单字符；响应体依赖浏览器缓存，导航离开后可能取不到；
+  后端抛
+  「面板未打开」时工具层转成「先调 browser_navigate」的可执行提示。
+
 ### Computer Use 坐标与安全约定
 
 - **坐标语义**：模型看到的截图左上角是 `(0,0)`；`computer` 执行时把该坐标加上
@@ -98,6 +132,12 @@ function fail(text: string): ToolResult;
 - **已知副作用**：`type` 走剪贴板粘贴（与 UI-TARS pyautogui `input_swap` 同策略），
   会覆盖用户当前剪贴板；工具描述里已向模型明示。
 - **`type` 里的中文**：走 Unicode 剪贴板粘贴，比 SendKeys 逐字符可靠。
+- **`drag`**：按下后 14 步插值移动再松开——拖拽类操作对瞬时大位移不友好。
+  Windows 与 macOS 分别用 mouse_event / kCGEventLeftMouseDragged。
+- **`focus`**：Windows 按**窗口标题**子串（不区分大小写）EnumWindows 匹配第一个
+  可见窗口，最小化先 SW_RESTORE 再 SetForegroundWindow；macOS 按**应用/进程名**
+  子串走 System Events 置 frontmost。应用启动/进程管理刻意不加——bash 已覆盖
+  （消失之问）。
 
 ## `describeToolsForModel()` —— 给模型的工具清单
 

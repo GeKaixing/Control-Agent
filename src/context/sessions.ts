@@ -211,7 +211,7 @@ interface StoredConfig {
   model?: string;
   /**
    * 工作目录覆写（桌面端专用）：用户显式指定的项目文件夹绝对路径。
-   * 缺省 = 桌面端用默认工作区（桌面上自动创建的 c-agent 文件夹）。
+   * 缺省 = 桌面端用默认工作区（桌面上的 workspace 文件夹）。
    * CLI 不读这个字段——CLI 的 cwd 本来就是用户 shell 所在目录。
    */
   cwd?: string;
@@ -289,6 +289,21 @@ export async function readSavedWorkspaceCwd(cwd: string): Promise<string | null>
   if (typeof dir !== "string") return null;
   const trimmed = dir.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * 原子写入工作目录覆写（桌面端设置弹窗的落盘点）。dir 为 null = 清除覆写，
+ * 回到缺省工作区。模型 spec / customModel 原样保留（互不干扰）。
+ */
+export async function saveWorkspaceCwd(cwd: string, dir: string | null): Promise<void> {
+  const prev = await readConfig(cwd);
+  await writeConfig(cwd, {
+    version: CONFIG_VERSION,
+    ...(prev?.model !== undefined ? { model: prev.model } : {}),
+    ...(prev?.customModel !== undefined ? { customModel: prev.customModel } : {}),
+    ...(dir !== null && dir.trim().length > 0 ? { cwd: dir.trim() } : {}),
+    updatedAt: Date.now(),
+  });
 }
 
 async function writeConfig(cwd: string, stored: StoredConfig): Promise<void> {

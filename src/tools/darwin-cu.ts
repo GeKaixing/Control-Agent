@@ -153,6 +153,36 @@ var e = $.CGEventCreateScrollWheelEvent($(), 1, 1, lines);
 post(e);`;
 }
 
+/** 拖拽：左键按下 → 14 步插值移动（kCGEventLeftMouseDragged）→ 终点松开 */
+export function macDragScript(): string {
+  return `${PRELUDE}${MOUSE_HELPERS}
+var x1 = ${ENV("CA_X")}, y1 = ${ENV("CA_Y")};
+var x2 = ${ENV("CA_X2")}, y2 = ${ENV("CA_Y2")};
+mouse($.kCGEventMouseMoved, $.kCGMouseButtonLeft, x1, y1, 0);
+$.NSThread.sleepForTimeInterval(0.08);
+mouse($.kCGEventLeftMouseDown, $.kCGMouseButtonLeft, x1, y1, 1);
+$.NSThread.sleepForTimeInterval(0.12);
+for (var i = 1; i <= 14; i++) {
+  mouse($.kCGEventLeftMouseDragged, $.kCGMouseButtonLeft,
+        x1 + (x2 - x1) * i / 14, y1 + (y2 - y1) * i / 14, 1);
+  $.NSThread.sleepForTimeInterval(0.02);
+}
+mouse($.kCGEventLeftMouseDragged, $.kCGMouseButtonLeft, x2, y2, 1);
+$.NSThread.sleepForTimeInterval(0.1);
+mouse($.kCGEventLeftMouseUp, $.kCGMouseButtonLeft, x2, y2, 1);`;
+}
+
+/** 激活应用：System Events 按进程名子串（不区分大小写）匹配，置 frontmost */
+export function macFocusScript(): string {
+  return `ObjC.import("Foundation");
+var t = $.NSProcessInfo.processInfo.environment.objectForKey("CA_TITLE").js.toLowerCase();
+var se = Application("System Events");
+var matches = se.processes.whose({ name: { _contains: t } })();
+if (matches.length === 0) throw new Error("未找到名称包含 '" + t + "' 的应用进程");
+matches[0].frontmost = true;
+"activated: " + matches[0].name();`;
+}
+
 /** 粘贴粘贴板内容（cmd+v），CA_ENTER=1 时补一个回车 */
 export function macPasteScript(): string {
   return `${PRELUDE}

@@ -2,11 +2,12 @@
 
 给编码代理看的仓库约定。动手改代码前先读完，能省掉大部分返工。
 
-## Computer Use
+## Computer Use & Browser Use & Mobile Use
 如果特斯拉可以使用视觉方案实现自动驾驶，那么Computer Use也可以使用视觉方案实现自动操作电脑。
-1. 寻找时候有mcp cli api skill 等开源的方式可以操作应用 
+1. 寻找是否有mcp cli api skill 等开源的方式可以操作应用
 2. 寻找是否有浏览器端可以使用Browser Use可以去操作
 3. 使用 Computer Use操作应用
+3. 使用 Mobile Use操作手机
 这条愿景的落地形态是**一条独立的工具通道**，不是替换现有工具：
 
 - **分层原则**：文本通道优先（read/write/edit/bash 等——token 便宜、可回滚、可检索）；
@@ -16,7 +17,10 @@
 - **感知端 `screenshot`**（只读）：截屏返回 JPEG 图片 + 尺寸。
   坐标语义：模型看到的截图左上角为 `(0,0)`，harness 不做任何坐标换算。
 - **执行端 `computer`**（mutating）：click / doubleClick / rightClick / type / hotkey /
-  scroll 六个动作，坐标必须来自最近一次 screenshot。两端实现均零 npm 依赖：
+  scroll / drag / focus 八个动作，坐标必须来自最近一次 screenshot。
+  drag 按下后 14 步插值移动再松开；focus 按窗口标题（Windows）/ 应用名（macOS）
+  子串激活窗口——应用启动/进程管理刻意不加，bash 已覆盖（消失之问）。
+  两端实现均零 npm 依赖：
   - Windows：PowerShell + System.Drawing / user32 P/Invoke；截多显示器并集，
     图片坐标加虚拟屏原点换算成物理像素，`SetProcessDPIAware` 保证高 DPI 一致。
   - macOS（`src/tools/darwin-cu.ts`）：`screencapture` 截主显示器 + `osascript`
@@ -81,7 +85,9 @@ harness 里的每一段逻辑、每一条系统提示词规则，都应该拿这
   事后回滚。审批层只负责「提前知情」，不假装自己是边界。
 - **Environment** — 模型对运行环境的感知与真边界，分三层。**感知**：事实给足不写
   规则——cwd、platform / Node、当前日期、shell（系统提示词），git 快照（branch +
-  未提交文件数）；模型知道得越准，猜错越少，兜底规则越少。**可逆性**：git 承担
+  未提交文件数），adb 设备探测（装配时 `adb devices` 一次，已连接的 Android
+  设备注入系统提示词——手机操作走 adb 文本通道，adb 未装则静默跳过，不占启动延迟）；
+  模型知道得越准，猜错越少，兜底规则越少。**可逆性**：git 承担
   事后回滚，是本机场景下实际最强的「权限」。**隔离**：沙箱 / 容器 / 无网是终极
   职责——等分发或跑不可信任务再上（与 Electron sandbox 同一决策模式），不在
   审批层补课。
@@ -164,6 +170,15 @@ g/
 │   │   ├── logger.ts             分级日志 → .c-agent/logs/（按天一份、绝不抛错）
 │   │   ├── index.ts              统一出口（引用方只认这里）
 │   │   └── doc/                  子模块文档（README.md）
+│   ├── cron/                   定时任务
+│   │   ├── parser.ts             零依赖 5 字段 cron 解析 + nextCronRun（按天跳跃）
+│   │   ├── store.ts              .c-agent/cron/jobs.json（原子写、坏文件回退 []）
+│   │   ├── scheduler.ts          CronScheduler：30s 轮询、串行 onDue、isBusy 延迟、
+│   │   │                         停机错过的时点补跑一次
+│   │   ├── runner.ts             runJobOnce：临时会话无头执行，跑完即弃
+│   │   ├── cli.ts                cron list/add/rm/on/off/run 子命令（run=前台守护）
+│   │   ├── index.ts              统一出口（cli.ts 不进出口）
+│   │   └── doc/                  子模块文档（README.md：语义与边界）
 │   └── doc/                    src/ 全局文档（README.md：数据流图 + 约定）
 └── tests/
     ├── run.ts                入口：编排 + 直接 import 内部模块的单元/集成测试（48）

@@ -14,6 +14,7 @@
 
 import { create } from "zustand";
 import type {
+  BrowserTabInfo,
   EndpointId,
   InfoPayload,
   ReasoningLevel,
@@ -65,6 +66,28 @@ export interface DictationState {
   errorMessage: string | null;
 }
 
+/**
+ * 内部浏览器面板的渲染层状态（browser_state 事件折算）。
+ * null = 尚未收到过事件（面板从未打开过或渲染层刚挂载）。
+ * tabs 里包含全部标签页（含后台），activeId 指向当前显示的标签。
+ */
+export interface BrowserPanelState {
+  open: boolean;
+  activeId: string | null;
+  tabs: BrowserTabInfo[];
+}
+
+/**
+ * 手机镜像面板的渲染层状态（phone_state 事件折算）。
+ * null = 尚未收到过事件（面板从未打开过）。帧数据不进 store——600ms 一帧的
+ * base64 会让全局订阅者跟着重渲染，帧订阅由 PhonePanel 组件自己持有。
+ */
+export interface PhonePanelState {
+  open: boolean;
+  connected: boolean;
+  device: string | null;
+}
+
 interface State {
   info: InfoPayload | null;
   usage: UsagePayload;
@@ -79,6 +102,10 @@ interface State {
   sessionSeq: number;
   /** 模型提问（ask_user 工具）待回答清单；有值时问答卡渲染在 Composer 上方 */
   pendingAsks: PendingAsk[];
+  /** 内部浏览器面板状态（browser_state 事件） */
+  browser: BrowserPanelState | null;
+  /** 手机镜像面板状态（phone_state 事件） */
+  phone: PhonePanelState | null;
 }
 
 interface Actions {
@@ -146,6 +173,8 @@ export const useSessionStore = create<State & Actions>((set, get) => ({
   sessionTitle: null,
   sessionSeq: 0,
   pendingAsks: [],
+  browser: null,
+  phone: null,
 
   setInfo: (info) => set({ info }),
 
@@ -373,6 +402,24 @@ export const useSessionStore = create<State & Actions>((set, get) => ({
         case "ask_user_done":
           // 收尾广播：本地 / msg-window / remote 等所有显示端统一按 id 撤卡
           return { pendingAsks: s.pendingAsks.filter((p) => p.id !== e.id) };
+        case "browser_state":
+          // 内部浏览器面板状态：主进程的折算全量快照（标签页 + 活动指针）
+          return {
+            browser: {
+              open: e.open,
+              activeId: e.activeId,
+              tabs: e.tabs,
+            },
+          };
+        case "phone_state":
+          // 手机镜像面板状态（帧数据由 PhonePanel 自行订阅，不进全局 store）
+          return {
+            phone: {
+              open: e.open,
+              connected: e.connected,
+              device: e.device,
+            },
+          };
         case "end":
           return { status: "idle", turns: markLastAssistantNotLive(s.turns) };
         case "error":

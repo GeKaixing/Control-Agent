@@ -23,6 +23,23 @@ const CATASTROPHIC_PATTERNS: { re: RegExp; why: string }[] = [
   { re: /\bdd\b[^|;&]*\bof=\/dev\/(?:sd|nvme|disk|rdisk)/, why: "直接写块设备" },
   { re: /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/, why: "fork 炸弹" },
   { re: /\bchmod\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*R[a-zA-Z]*\s+777\s+\/(?:\s|$)/, why: "对根目录递归开放全部权限" },
+  // ---- Windows（PowerShell / cmd 均按命令文本拦；Git Bash 里调 powershell/cmd 也命中）----
+  // 只拦「毁掉整个环境」级：盘符根、整块磁盘、系统配置单元、还原点。
+  // C:\Users\xxx 之类的子目录正常放行（日常工作）。
+  { re: /\bformat(?:\.com)?\s+\/?[a-zA-Z]:/i, why: "格式化磁盘" },
+  // 顺序无关：无论 clean 出现在 diskpart 前（echo 管道拼脚本）还是后都命中
+  { re: /\bdiskpart\b[\s\S]*\bclean\b|\bclean\b[\s\S]*\bdiskpart\b/i, why: "diskpart 清空磁盘" },
+  // PowerShell 递归删除盘符根（含 C:\* 写法）：Remove-Item 及其别名 ri/rm/del/erase，
+  // 递归参数 -r 前缀族（PS 允许参数缩写，-readonly 这类不会误命中）
+  { re: /\b(?:Remove-Item|ri|rm|del|erase)\b[^|;&>]*-(?:r|re|rec|recur|recurse)\b[^|;&>]*(?:['"]\s*)?[A-Za-z]:[\\\/]?(?:\*\.\*|\*)?['"]?(?=\s|;|&|\||$)/i, why: "递归删除整个盘（PowerShell）" },
+  { re: /\b(?:Remove-Item|ri|rm)\b[^|;&>]*-(?:r|re|rec|recur|recurse)\b[^|;&>]*(?:\$env:USERPROFILE|\$HOME|~)(?=\s|;|&|\||$)/i, why: "递归删除整个家目录（PowerShell）" },
+  // cmd 递归删除盘符根：rd /s /q C:\ 、del /s /q C:\*.*
+  { re: /\b(?:rd|rmdir|del|erase)\s+(?:\/[sqf]\s+){1,2}['"]?[A-Za-z]:[\\\/]?(?:\*\.\*|\*)?['"]?(?=\s|;|&|\||$)/i, why: "递归删除整个盘（cmd）" },
+  // 删除注册表系统配置单元（整个 hive 或其根键；删除深层子键属正常运维，不拦）
+  { re: /\breg\s+delete\s+HK(?:LM|CR|CC|CU|U)(?:\\(?:SOFTWARE|SYSTEM|SAM|SECURITY|DEFAULT))?(?:\s+\/[a-z]+)*\s*(?=$|&|\||;)/i, why: "删除注册表系统配置单元" },
+  // 删光卷影副本 = 删光系统还原点，不可逆（勒索软件常规前置动作）
+  { re: /\bvssadmin\b[^|;&>]*delete\s+shadows/i, why: "删除卷影副本（系统还原点）" },
+  { re: /\bwmic\b[^|;&>]*shadowcopy[^|;&>]*delete/i, why: "删除卷影副本（系统还原点）" },
 ];
 
 /** 返回命中的灾难模式说明；未命中返回 null */

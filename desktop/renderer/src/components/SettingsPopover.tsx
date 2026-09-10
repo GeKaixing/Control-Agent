@@ -95,6 +95,44 @@ function ComposerHintsToggle(): React.ReactElement {
 }
 
 /**
+ * 「工作目录」行：显示当前会话工作目录（info.cwd），「更改」按钮打开系统
+ * 目录选择对话框（主进程 dialog），选中即切换并落盘。切换失败（任务运行中 /
+ * 目录不可创建 / 取消）时在描述行就地显示原因，不打断弹层。
+ */
+function WorkspaceDirRow({
+  cwd,
+  onPick,
+}: {
+  cwd: string;
+  /** 返回 null = 成功（refresh-info 广播后 cwd 回显）；返回字符串 = 失败原因 */
+  onPick: () => Promise<string | null>;
+}): React.ReactElement {
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <div className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px]">
+      <span className="min-w-0 flex-1">
+        <div className="font-medium">工作目录</div>
+        <div className="truncate text-[10px] text-muted-foreground" title={error ?? cwd}>
+          {error ?? cwd}
+        </div>
+      </span>
+      <button
+        type="button"
+        onClick={() => {
+          setError(null);
+          void onPick().then((err) => {
+            if (err !== null) setError(err);
+          });
+        }}
+        className="shrink-0 rounded-md border border-border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+      >
+        更改
+      </button>
+    </div>
+  );
+}
+
+/**
  * 「设置」弹层内容，渲染在弹层子窗口里（PopoverHost）。
  * 与运行模式弹层不同：切换后不关弹层（开关有回显，refresh-info 由主进程
  * 广播、PopoverHost 重拉 info），用户可以连续调多项再点别处收起。
@@ -105,11 +143,13 @@ export function SettingsContent({
   msgWindow,
   localPreview,
   alwaysOnTop,
+  workspaceCwd,
   onApprovalModeChange,
   onAutoCompactChange,
   onMsgWindowChange,
   onLocalPreviewChange,
   onAlwaysOnTopChange,
+  onPickWorkspaceCwd,
 }: {
   approvalMode: boolean;
   autoCompact: boolean;
@@ -119,6 +159,8 @@ export function SettingsContent({
   localPreview: boolean;
   /** 窗口置顶开关状态（info.alwaysOnTop），默认关闭 */
   alwaysOnTop: boolean;
+  /** 当前会话工作目录（info.cwd），「工作目录」行的显示值 */
+  workspaceCwd: string;
   onApprovalModeChange: (on: boolean) => void;
   onAutoCompactChange: (on: boolean) => void;
   /** 切换独立消息弹窗：主进程创建/销毁小窗 + refresh-info 广播回显 */
@@ -127,6 +169,8 @@ export function SettingsContent({
   onLocalPreviewChange: (on: boolean) => void;
   /** 切换窗口置顶：主进程 setAlwaysOnTop + refresh-info 广播回显 */
   onAlwaysOnTopChange: (on: boolean) => void;
+  /** 打开目录选择对话框切换工作目录；返回失败原因（成功返回 null） */
+  onPickWorkspaceCwd: () => Promise<string | null>;
 }): React.ReactElement {
   return (
     <div className="w-full overflow-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-md">
@@ -135,7 +179,7 @@ export function SettingsContent({
       </div>
       <div className="py-1">
         {/* Permission 支柱：审批模式。开启后 write/edit/bash 等改动型工具每次
-            执行前弹原生 dialog 询问（含「本会话全部允许」快捷选项）。 */}
+            执行前弹原生 dialog 询问（含「本会话内该工具不再询问」快捷选项）。 */}
         <ToggleRow
           on={approvalMode}
           label="执行前询问（审批模式）"
@@ -182,6 +226,9 @@ export function SettingsContent({
           }
           onClick={() => onAlwaysOnTopChange(!alwaysOnTop)}
         />
+        {/* 工作目录：agent 干活的地方（工具相对路径 / 产物 / MEMORY.md 的落点）。
+            缺省 = 桌面上的 workspace；「更改」走系统目录对话框，立即生效并落盘。 */}
+        <WorkspaceDirRow cwd={workspaceCwd} onPick={onPickWorkspaceCwd} />
         {/* 输入提示行：纯渲染层偏好（localStorage），不走主进程——
             与上面的开关不同，不需要 refresh-info 回显（组件自有 state）。 */}
         <ComposerHintsToggle />

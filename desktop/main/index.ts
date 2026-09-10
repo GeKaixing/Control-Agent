@@ -30,6 +30,8 @@ import { ConnectorRuntime } from "../../src/connector/runtime/connector-runtime.
 import { createDisplayRoute, type DisplayRoute } from "../../src/connector/runtime/display-route.js";
 import DesktopDisplayConnector from "../../src/connector/connectors/desktop-display/index.js";
 import { dispatchApi } from "./api-dispatcher.js";
+import * as BrowserPanel from "./browser-view.js";
+import * as PhoneMirror from "./phone-mirror.js";
 import WsDisplayBridge from "./ws-bridge.js";
 import TrayStatusBridge from "./tray-status.js";
 import { IPC } from "./ipc.js";
@@ -42,9 +44,12 @@ import {
   readSavedWorkspaceCwd,
   saveCustomModel,
   saveModelSpec,
+  saveWorkspaceCwd,
   type StoredCustomModel,
 } from "../../src/context/index.js";
 import type { WireEvent } from "../shared/api.js";
+import { setBrowserBackend } from "../../src/tools/browser.js";
+import { initFileLogging, log } from "../../src/log/index.js";
 
 interface StartDeps {
   __dirname: string;
@@ -52,6 +57,12 @@ interface StartDeps {
 
 let mainWindow: BrowserWindow | null = null;
 let session: SessionManager | null = null;
+/**
+ * 当前会话工作目录（resolveSessionCwd 的结果，bootstrap 时赋值；设置弹窗
+ * 「工作目录」切换时更新）。模块级：registerIpcHandlers 的 handler 与
+ * SessionManager 的 deps.cwd 闭包都要读它。
+ */
+let sessionCwd = "";
 let dictation: DictationController | null = null;
 /** 消息显示的 connector runtime；「默认连接」的 desktop-display connector 也注册在这里 */
 let displayRuntime: ConnectorRuntime | null = null;
@@ -83,6 +94,24 @@ let popoverLastId: string | null = null;
 
 const RENDERER_DEV_URL = process.env["VITE_DEV_SERVER_URL"] ?? "http://127.0.0.1:5173";
 const IS_DEV = !app.isPackaged;
+/**
+ * 内部浏览器面板打开时的窗口高度下限：面板区（min 480）+ 工具条 + 拖动条 +
+ * Composer。低于这个高度 Composer 会被占位区挤出视口。RESIZE_WINDOW 的
+ * 钳制下限与 BROWSER_OPEN 的窗口保底高度都用这个值。
+ */
+/** 浏览器面板打开时的窗口保底高度：拖动条 + 标签条 + 工具条 + 占位区最小
+ * 480 + Composer——700 会被 Composer 顶出视口裁掉（真实最小内容 ≈ 750+）。 */
+const BROWSER_MIN_WINDOW_HEIGHT = 768;
+
+/** 面板需要空间：窗口高度保底（渲染层浏览器区 min 480 + 标签条 + 工具条 +
+ * 拖动条 + Composer）。BROWSER_OPEN / BROWSER_NEW_TAB 共用。 */
+function ensureBrowserWindowHeight(): void {
+  if (mainWindow === null || mainWindow.isDestroyed()) return;
+  const [width, height] = mainWindow.getContentSize();
+  if (height < BROWSER_MIN_WINDOW_HEIGHT) {
+    mainWindow.setContentSize(width, BROWSER_MIN_WINDOW_HEIGHT);
+  }
+}
 
 /** 渲染层 vite build 产物入口（相对 desktop/main 上一层） */
 function indexHtmlPath(deps: StartDeps): string {
@@ -388,6 +417,35 @@ function registerIpcHandlers(deps: StartDeps): void {
     }
     pushEvent({ t: "ui_action", action: "refresh-info" });
   });
+  // 设置弹窗「工作目录」：目录选择对话框在这里开（SessionManager 不碰
+  // Electron UI），目录可创建性先行校验，然后走 dispatcher 改 state.cwd + 落盘。
+  // 成功后同步 sessionCwd（deps.cwd 闭包的取值源）并广播 refresh-info 回显。
+  ipcMain.handle(IPC.CHOOSE_WORKSPACE_CWD, async () => {
+    const picked = await dialog.showOpenDialog(mainWindow!, {
+      title: "选择工作目录",
+      defaultPath: sessionCwd,
+      properties: ["openDirectory", "createDirectory"],
+    });
+    if (picked.canceled || picked.filePaths.length === 0) {
+      return { ok: false, error: "已取消" };
+    }
+    const dir = picked.filePaths[0]!;
+    try {
+      await mkdir(dir, { recursive: true });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: `目录不可用（${msg}）` };
+    }
+    const result = await dispatchApi(session!, "setWorkspaceCwd", [dir]);
+    const r = result as { ok?: boolean; error?: string };
+    if (r?.ok !== true) {
+      return { ok: false, error: r?.error ?? "切换失败" };
+    }
+    sessionCwd = dir;
+    console.log(`[session] 工作目录已切换：${dir}`);
+    pushEvent({ t: "ui_action", action: "refresh-info" });
+    return { ok: true, path: dir };
+  });
   // 弹层子窗口里切会话：主窗口靠 sessions-changed 触发 applyRemoteSwitch（reset + 重拉）
   handle(IPC.SWITCH_TO, "switchTo", "sessions-changed");
   handle(IPC.PAUSE, "pause");
@@ -403,6 +461,76 @@ function registerIpcHandlers(deps: StartDeps): void {
   handle(IPC.LIST_MODELS, "listModels");
   handle(IPC.LIST_CUSTOM_MODELS, "listCustomModels");
 
+  // ── 内部浏览器面板 ──
+  // 不走 dispatchApi（SessionManager 不碰 Electron UI，与弹层同一归类）。
+  // 状态变化由 browser-view 的 listener 经 PUSH 通道 browser_state 回推渲染层。
+  BrowserPanel.setBrowserStateListener((s) => {
+    pushEvent({ t: "browser_state", ...s });
+  });
+  // ── 手机镜像面板 ──
+  // 与浏览器面板同一归类：不碰 SessionManager，事件经 PUSH 通道回推。
+  // 面板间互斥（原生 WebContentsView 会盖住渲染层 DOM 面板）在这里做，
+  // 渲染层只管自己的开关意图。
+  PhoneMirror.setPhoneStateListener((s) => {
+    pushEvent({ t: "phone_state", ...s });
+  });
+  PhoneMirror.setPhoneFrameListener((f) => {
+    pushEvent({ t: "phone_frame", ...f });
+  });
+  ipcMain.handle(IPC.PHONE_OPEN, async () => {
+    if (mainWindow === null || mainWindow.isDestroyed()) return;
+    BrowserPanel.close();
+    PhoneMirror.open();
+    ensureBrowserWindowHeight();
+  });
+  ipcMain.handle(IPC.PHONE_CLOSE, async () => {
+    PhoneMirror.close();
+  });
+  ipcMain.handle(IPC.PHONE_TAP, async (_e: IpcMainInvokeEvent, x: unknown, y: unknown) => {
+    await PhoneMirror.tap(x, y);
+  });
+  ipcMain.handle(
+    IPC.PHONE_SWIPE,
+    async (_e: IpcMainInvokeEvent, x1: unknown, y1: unknown, x2: unknown, y2: unknown, durationMs: unknown) => {
+      await PhoneMirror.swipe(x1, y1, x2, y2, durationMs);
+    },
+  );
+  ipcMain.handle(IPC.PHONE_KEY, async (_e: IpcMainInvokeEvent, keycode: unknown) => {
+    await PhoneMirror.key(keycode);
+  });
+  ipcMain.handle(IPC.PHONE_REFRESH, async () => {
+    PhoneMirror.refresh();
+  });
+  ipcMain.handle(IPC.BROWSER_OPEN, async (_e: IpcMainInvokeEvent, url: unknown) => {
+    if (mainWindow === null || mainWindow.isDestroyed()) return;
+    BrowserPanel.open(mainWindow, typeof url === "string" && url.length > 0 ? url : undefined);
+    ensureBrowserWindowHeight();
+  });
+  ipcMain.handle(IPC.BROWSER_NEW_TAB, async (_e: IpcMainInvokeEvent, url: unknown) => {
+    if (mainWindow === null || mainWindow.isDestroyed()) return;
+    BrowserPanel.newTab(typeof url === "string" && url.trim().length > 0 ? url.trim() : undefined);
+    ensureBrowserWindowHeight();
+  });
+  ipcMain.handle(IPC.BROWSER_CLOSE_TAB, async (_e: IpcMainInvokeEvent, id: unknown) => {
+    if (typeof id === "string") BrowserPanel.closeTab(id);
+  });
+  ipcMain.handle(IPC.BROWSER_SWITCH_TAB, async (_e: IpcMainInvokeEvent, id: unknown) => {
+    if (typeof id === "string") BrowserPanel.switchTab(id);
+  });
+  ipcMain.handle(IPC.BROWSER_CLOSE, async () => {
+    BrowserPanel.close();
+  });
+  ipcMain.handle(IPC.BROWSER_NAVIGATE, async (_e: IpcMainInvokeEvent, input: unknown) => {
+    if (typeof input === "string") BrowserPanel.navigate(input);
+  });
+  ipcMain.handle(IPC.BROWSER_BACK, async () => BrowserPanel.back());
+  ipcMain.handle(IPC.BROWSER_FORWARD, async () => BrowserPanel.forward());
+  ipcMain.handle(IPC.BROWSER_RELOAD, async () => BrowserPanel.reload());
+  ipcMain.handle(IPC.BROWSER_STOP, async () => BrowserPanel.stop());
+  ipcMain.handle(IPC.BROWSER_SET_RECT, async (_e: IpcMainInvokeEvent, rect: unknown) => {
+    BrowserPanel.setRect(rect);
+  });
+
   // 听写不属于 SessionManager（独立 helper 进程），不走 dispatchApi：
   ipcMain.handle(IPC.DICTATE_START, async () => {
     if (dictation === null) return;
@@ -416,11 +544,17 @@ function registerIpcHandlers(deps: StartDeps): void {
 
   // 窗口自适应高度（Composer-only 布局）：渲染层量出内容高度后调这里，
   // 主进程把窗口收到正好包住内容。宽度保持用户当前值；高度夹在合理区间防抖。
+  // 浏览器面板打开时渲染层根容器是 100vh、面板区 flex-1：RO 上报的是视口高度，
+  // 下限提到 BROWSER_MIN_WINDOW_HEIGHT（防 Composer 被挤出视口），上限放开到
+  // 2000（用户最大化时上报视口高度，不能被 800 钳回去跟用户抢窗口）。
   ipcMain.handle(IPC.RESIZE_WINDOW, async (_e: IpcMainInvokeEvent, height: unknown) => {
     if (mainWindow === null || mainWindow.isDestroyed()) return;
     const h = typeof height === "number" ? Math.round(height) : NaN;
     if (!Number.isFinite(h)) return;
-    const clamped = Math.min(Math.max(h, 120), 800);
+    const browserOpen = BrowserPanel.isOpen();
+    const minH = browserOpen ? BROWSER_MIN_WINDOW_HEIGHT : 120;
+    const maxH = browserOpen ? 2000 : 800;
+    const clamped = Math.min(Math.max(h, minH), maxH);
     const [width] = mainWindow.getContentSize();
     const [, currentHeight] = mainWindow.getContentSize();
     if (Math.abs(currentHeight - clamped) >= 1) {
@@ -573,7 +707,7 @@ function registerIpcHandlers(deps: StartDeps): void {
 
 /**
  * Permission 支柱：审批弹窗（原生 modal dialog，主窗口内模态）。
- * 三个选项：本次允许 / 本会话全部允许 / 拒绝（cancel/Esc = 拒绝）。
+ * 三个选项：本次允许 / 本会话内该工具不再询问 / 拒绝（cancel/Esc = 拒绝）。
  * 窗口不可用时（已销毁/最小化到托盘）fail-safe 返回 deny。
  */
 const approvalPrompt: NonNullable<SessionDeps["approvalPrompt"]> = async ({ toolName, args }) => {
@@ -583,7 +717,7 @@ const approvalPrompt: NonNullable<SessionDeps["approvalPrompt"]> = async ({ tool
     type: "warning",
     message: `允许执行 ${toolName}？`,
     detail: args.length > 0 ? args : undefined,
-    buttons: ["允许", "本会话全部允许", "拒绝"],
+    buttons: ["允许", `本会话内 ${toolName} 不再询问`, "拒绝"],
     defaultId: 0,
     cancelId: 2,
     noLink: true,
@@ -639,6 +773,11 @@ async function createWindow(deps: StartDeps): Promise<void> {
   mainWindow.on("closed", () => {
     mainWindow = null;
     closePopoverWin();
+    // 浏览器面板视图挂在主窗口 contentView 上：窗口没了视图必须跟着拆，
+    // 否则 close() 里的 owner.isDestroyed 保护虽然不炸，但快照/事件还挂着
+    BrowserPanel.destroy();
+    // 手机镜像轮询随窗口关闭停止（防止后台空转 adb）
+    PhoneMirror.shutdown();
   });
 
   await loadRenderer(mainWindow, deps);
@@ -675,6 +814,7 @@ function resolveDistConnectorsDir(distRoot: string): string | null {
  * 2. 缺省 = 桌面上的中性工作区文件夹 workspace（没有则创建）——刻意不叫
  *    c-agent，避免 agent 把工作区误认成 c-agent 项目本身；MEMORY.md、
  *    相对路径产物都落在这个独立目录，不污染 app home。
+ * 缺省只是兜底，不写死：灵活性由 config.json 的 cwd 字段承接。
  * 创建失败不阻断启动——回落 app home 并 console 留痕（与 connectors start
  * 失败同一策略：跳过但不崩）。
  */
@@ -693,6 +833,16 @@ async function resolveSessionCwd(): Promise<string> {
 }
 
 async function bootstrap(deps: StartDeps): Promise<void> {
+  // 文件日志：与 CLI 入口（src/index.ts）接同一条落盘通道。锚 process.cwd()
+  // （app home）而非 sessionCwd——会话工作目录可在运行中切换，app home 稳定，
+  // 且 config.json / connectors 已锚这里，日志跟它们同址便于排障。
+  // initFileLogging 自身绝不抛错，磁盘不可写时静默禁用，不影响启动。
+  initFileLogging(process.cwd());
+  log.info("desktop", `启动 cwd=${process.cwd()}`);
+  // 桌面端没有常驻终端，顶层异常如果不落盘就彻底消失——CLI 有同款兜底。
+  process.on("uncaughtException", (err) => log.error("desktop", "uncaughtException", err));
+  process.on("unhandledRejection", (reason) => log.error("desktop", "unhandledRejection", reason));
+
   // 必须放在 app.whenReady() 之前。关掉 Chromium 的 OS-level sandbox（renderer / GPU /
   // network 三个 helper 进程在限制性沙箱里启动时会撞 `sandbox initialization failed:
   // Operation not permitted` 然后连环崩，GPU 报 SIGTRAP 直接拉走主进程）。
@@ -717,12 +867,19 @@ async function bootstrap(deps: StartDeps): Promise<void> {
   // 全窗口的外链与导航护栏（markdown 渲染后 <a> 可点，必须有这一层）：
   // - window.open / target=_blank 一律拒绝建新 Electron 窗，http(s) 转系统默认浏览器；
   // - 页内导航（will-navigate）一律拦掉——三个窗口都是单页应用，任何导航企图都是异常。
+  // 例外：内部浏览器面板的 webContents——页内导航是它的本职，必须豁免（见 browser-view.ts）。
+  // 识别靠「创建期标志」：web-contents-created 在 WebContentsView 构造函数内同步派发，
+  // 那一刻 isCreatingBrowserView() 为 true，事后 WeakSet 认账。
   // 挂在 web-contents-created 上：主窗口、弹层、消息弹窗（及未来新窗）全覆盖。
   app.on("web-contents-created", (_event, contents) => {
+    if (BrowserPanel.isCreatingBrowserView()) {
+      BrowserPanel.markBrowserContents(contents);
+    }
     contents.setWindowOpenHandler(({ url }) => {
       if (/^https?:/i.test(url)) void shell.openExternal(url);
       return { action: "deny" };
     });
+    if (BrowserPanel.isBrowserContents(contents)) return; // 浏览器面板：放行页内导航
     contents.on("will-navigate", (e) => e.preventDefault());
   });
 
@@ -737,8 +894,9 @@ async function bootstrap(deps: StartDeps): Promise<void> {
     modelEnvSet || savedModelSpec !== null ? null : await readSavedCustomModel(desktopCwd);
 
   // 会话工作目录与配置锚点分离：agent 干活的地方（见 resolveSessionCwd），
-  // config / connectors 仍锚在 app home（process.cwd()）——持久化路径不随会话漂移
-  const sessionCwd = await resolveSessionCwd();
+  // config / connectors 仍锚在 app home（process.cwd()）——持久化路径不随会话漂移。
+  // 赋给模块级 sessionCwd：deps.cwd 闭包与「工作目录」IPC handler 都读它。
+  sessionCwd = await resolveSessionCwd();
   console.log(`[session] 工作目录：${sessionCwd}`);
 
   // 工具型 connector：扫描编译产物里的 connectors-mcp（Loader 会动态 import 编译后的
@@ -798,6 +956,14 @@ async function bootstrap(deps: StartDeps): Promise<void> {
         );
       });
     },
+    // 工作目录变更落盘（setWorkspaceCwd 成功后触发）；写失败只留痕不阻断
+    persistWorkspaceCwd: (dir: string) => {
+      void saveWorkspaceCwd(desktopCwd, dir).catch((err: unknown) => {
+        console.error(
+          `[session] 工作目录保存失败（${dir}）：${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    },
   });
   // 恢复上次的自定义模型（完整参数重建 ModelRef）。走 setCustomModel 复用
   // 同一条校验/构造/state 同步链路；回写同值幂等，无害。
@@ -837,6 +1003,10 @@ async function bootstrap(deps: StartDeps): Promise<void> {
     deps.__dirname,
   );
   registerIpcHandlers(deps);
+
+  // agent 的内部浏览器控制通道：browser_* 工具的后端。闭包实时读当前面板，
+  // 面板开关多次无需重注。CLI / print 端不注入 → 工具优雅 fail。
+  setBrowserBackend(BrowserPanel.browserBackend());
 
   await createWindow(deps);
 

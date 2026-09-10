@@ -3,6 +3,7 @@
 import type { LlmTool } from "../providers/types.js";
 import { askUserTool } from "./ask-user.js";
 import { bashTool, resolveShell, type ShellSpec } from "./bash.js";
+import { browserEvaluateTool, browserInputTool, browserInterceptTool, browserNavigateTool, browserNetworkTool, browserReadTool, browserScreenshotTool, browserTabsTool, browserWaitTool } from "./browser.js";
 import { computerTool } from "./computer.js";
 import { editTool } from "./edit.js";
 import { globTool } from "./glob.js";
@@ -33,6 +34,15 @@ const _registry = {
   memory: memoryTool,
   screenshot: screenshotTool,
   computer: computerTool,
+  browser_navigate: browserNavigateTool,
+  browser_read: browserReadTool,
+  browser_screenshot: browserScreenshotTool,
+  browser_evaluate: browserEvaluateTool,
+  browser_input: browserInputTool,
+  browser_network: browserNetworkTool,
+  browser_tabs: browserTabsTool,
+  browser_wait: browserWaitTool,
+  browser_intercept: browserInterceptTool,
   ask_user: askUserTool,
 } as const;
 
@@ -66,7 +76,8 @@ export function describeToolsForModel(tools: Tool[] = allTools): LlmTool[] {
 }
 
 export type { Tool, ToolContext, ToolResult } from "./types.js";
-export { askUserTool, bashTool, computerTool, editTool, globTool, grepTool, memoryTool, readTool, screenshotTool, writeTool, resolveShell };
+export { askUserTool, bashTool, browserEvaluateTool, browserInputTool, browserInterceptTool, browserNavigateTool, browserNetworkTool, browserReadTool, browserScreenshotTool, browserTabsTool, browserWaitTool, computerTool, editTool, globTool, grepTool, memoryTool, readTool, screenshotTool, writeTool, resolveShell };
 export { setAskUserHandler, type AskUserFn, type AskUserRequest } from "./ask-user.js";
+export { setBrowserBackend, type BrowserBackend, type BrowserInputSpec, type BrowserPageSnapshot, type BrowserScreenshot, type BrowserTabEntry, type BrowserWaitSpec, type InterceptRule, type NetworkBody, type NetworkEntry } from "./browser.js";
 export { memoryPath, MEMORY_FILE } from "./memory.js";
 export type { ShellSpec };

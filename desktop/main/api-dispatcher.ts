@@ -29,6 +29,7 @@ export type ApiMethodName =
   | "setMsgWindow"
   | "setLocalPreview"
   | "setAlwaysOnTop"
+  | "setWorkspaceCwd"
   | "pause"
   | "resume"
   | "getUsage"
@@ -140,6 +141,13 @@ export async function dispatchApi(
       // （dispatcher 是纯逻辑层，不能碰 BrowserWindow）
       session.setAlwaysOnTop(args[0] === true);
       return undefined;
+    }
+    case "setWorkspaceCwd": {
+      // 纯逻辑层：改所有会话 state.cwd + 落盘钩子；目录选择对话框与
+      // mkdir 在 index.ts 的 IPC handler 里做（不能碰 Electron UI）
+      const dir = args[0];
+      if (typeof dir !== "string") return { ok: false, error: "缺少目录路径" };
+      return session.setWorkspaceCwd(dir);
     }
     case "pause":
       session.pause();

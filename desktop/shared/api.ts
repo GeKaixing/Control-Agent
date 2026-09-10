@@ -72,7 +72,61 @@ export type WireEvent =
    */
   | { t: "ask_user"; id: string; question: string; choices?: string[] }
   /** ask_user 收尾：answer 有值 = 用户已回答；aborted=true = 中断/跳过（无答案）。 */
-  | { t: "ask_user_done"; id: string; answer?: string; aborted?: boolean };
+  | { t: "ask_user_done"; id: string; answer?: string; aborted?: boolean }
+  /**
+   * 内部浏览器面板状态广播（主进程的折算全量快照）。
+   * open=false = 面板被摘下（标签页仍在后台保活）；url 为空串 = 尚未导航
+   * （about:blank 折算成空串，地址栏显示占位提示）。
+   */
+  | {
+      t: "browser_state";
+      open: boolean;
+      activeId: string | null;
+      tabs: BrowserTabInfo[];
+    }
+  /**
+   * 手机镜像面板状态广播（与 browser_state 同模式：主进程折算全量快照）。
+   * connected=false = adb 探测不到设备（MuMu 未启动 / 真机未插线），
+   * 面板仍保持打开并展示提示，设备恢复后帧自动续上。
+   */
+  | { t: "phone_state"; open: boolean; connected: boolean; device: string | null }
+  /**
+   * 手机镜像的帧推送（adb screencap → nativeImage JPEG）。width/height 是
+   * **本帧实测尺寸**——模拟器横竖屏翻转分辨率会变，手势换算必须按帧算。
+   */
+  | { t: "phone_frame"; dataUrl: string; width: number; height: number };
+
+/** 内部浏览器面板的单个标签页快照（browser_state 事件的 tabs 元素）。 */
+export interface BrowserTabInfo {
+  id: string;
+  title: string;
+  url: string;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+}
+
+/** 手机镜像面板状态快照（phone_state 事件，主进程折算全量）。 */
+export interface PhoneStateInfo {
+  open: boolean;
+  connected: boolean;
+  device: string | null;
+}
+
+/** 手机镜像的帧（phone_frame 事件）。width/height 为本帧实测尺寸。 */
+export interface PhoneFrameInfo {
+  dataUrl: string;
+  width: number;
+  height: number;
+}
+
+/** 内部浏览器面板：渲染层占位区相对窗口视口（content area）的矩形（CSS px = DIP）。 */
+export interface BrowserRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 /**
  * 菜单弹层子窗口请求：弹层渲染在独立无边框窗口里（浮在触发按钮下方），
@@ -306,6 +360,15 @@ export interface DeleteSessionResult {
   error?: string;
 }
 
+/** chooseWorkspaceCwd 的返回：主进程目录选择对话框的结果 + 切换结果。 */
+export interface ChooseWorkspaceResult {
+  ok: boolean;
+  /** ok=true 时用户选中的目录绝对路径 */
+  path?: string;
+  /** ok=false 时的失败原因（用户取消 / 任务运行中 / 目录不可创建） */
+  error?: string;
+}
+
 export interface UsagePayload {
   input: number;
   output: number;
@@ -474,6 +537,46 @@ export interface DesktopApi {
    * 偏好由主进程回写，经 info 回显到设置弹层。
    */
   setAlwaysOnTop(on: boolean): Promise<void>;
+  /**
+   * 打开系统目录选择对话框，把选中的目录设为会话工作目录（立即生效，
+   * 所有会话的 state.cwd 统一改写 + 落盘 config.json）。用户取消或切换
+   * 失败（任务运行中 / 目录不可创建）时 ok=false 并带 error。
+   */
+  chooseWorkspaceCwd(): Promise<ChooseWorkspaceResult>;
+  /** 打开内部浏览器面板（已开时仅导航到 url；url 空/缺省保持当前页）。 */
+  browserOpen(url?: string): Promise<void>;
+  /** 关闭内部浏览器面板（标签页全部保活，重开即原样；幂等）。 */
+  browserClose(): Promise<void>;
+  /** 新建标签页（url 可选；缺省铺新标签页提示）。 */
+  browserNewTab(url?: string): Promise<void>;
+  /** 关闭标签页（真正销毁该标签；关活动标签时自动补位）。 */
+  browserCloseTab(id: string): Promise<void>;
+  /** 切换活动标签页。 */
+  browserSwitchTab(id: string): Promise<void>;
+  /** 地址栏导航：像 URL 就直开，像搜索词就走 Bing 搜索。 */
+  browserNavigate(input: string): Promise<void>;
+  browserBack(): Promise<void>;
+  browserForward(): Promise<void>;
+  browserReload(): Promise<void>;
+  /** 停止当前加载（loading 态点刷新按钮位时调用）。 */
+  browserStop(): Promise<void>;
+  /**
+   * 上报渲染层占位区的视口矩形：主进程把 WebContentsView 精确贴到这个矩形上。
+   * 挂载、窗口缩放、上方内容高度变化时都由渲染层 ResizeObserver 触发上报。
+   */
+  browserSetRect(rect: BrowserRect): Promise<void>;
+  /** 打开手机镜像面板（与浏览器面板互斥：先关浏览器再开镜像；幂等）。 */
+  phoneOpen(): Promise<void>;
+  /** 关闭手机镜像面板（停帧轮询；幂等）。 */
+  phoneClose(): Promise<void>;
+  /** 注入点击。x/y 为设备物理像素（渲染层按帧尺寸换算后传入）。 */
+  phoneTap(x: number, y: number): Promise<void>;
+  /** 注入滑动（按下 → 平移 → 松开）。坐标同 tap，duration 为毫秒。 */
+  phoneSwipe(x1: number, y1: number, x2: number, y2: number, durationMs: number): Promise<void>;
+  /** 注入按键（Android keycode：3=HOME、4=返回、187=最近任务）。 */
+  phoneKey(keycode: number): Promise<void>;
+  /** 手动补一帧（面板挂载 / 用户点刷新时调用）。 */
+  phoneRefresh(): Promise<void>;
   onEvent(cb: (e: WireEvent) => void): () => void;
 }
 

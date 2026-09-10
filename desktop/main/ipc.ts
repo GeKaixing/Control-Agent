@@ -31,6 +31,8 @@ export const IPC = {
   SET_LOCAL_PREVIEW: "desktop:setLocalPreview",
   /** 窗口置顶开关（默认不开启）：开启后主窗口始终浮在所有窗口之上 */
   SET_ALWAYS_ON_TOP: "desktop:setAlwaysOnTop",
+  /** 设置弹窗「工作目录」：打开目录选择对话框，选中即切换（立即生效 + 落盘） */
+  CHOOSE_WORKSPACE_CWD: "desktop:chooseWorkspaceCwd",
   PAUSE: "desktop:pause",
   RESUME: "desktop:resume",
   GET_USAGE: "desktop:getUsage",
@@ -58,6 +60,25 @@ export const IPC = {
   /** 「历史会话」：磁盘持久化会话清单 / 删除指定会话文件 */
   LIST_PERSISTED_SESSIONS: "desktop:listPersistedSessions",
   DELETE_SESSION: "desktop:deleteSession",
+  /** 内部浏览器面板：标签页 / 开关 / 导航 / 占位区矩形上报（状态经 PUSH 通道 browser_state 回推） */
+  BROWSER_OPEN: "desktop:browserOpen",
+  BROWSER_CLOSE: "desktop:browserClose",
+  BROWSER_NEW_TAB: "desktop:browserNewTab",
+  BROWSER_CLOSE_TAB: "desktop:browserCloseTab",
+  BROWSER_SWITCH_TAB: "desktop:browserSwitchTab",
+  BROWSER_NAVIGATE: "desktop:browserNavigate",
+  BROWSER_BACK: "desktop:browserBack",
+  BROWSER_FORWARD: "desktop:browserForward",
+  BROWSER_RELOAD: "desktop:browserReload",
+  BROWSER_STOP: "desktop:browserStop",
+  BROWSER_SET_RECT: "desktop:browserSetRect",
+  /** 手机镜像面板：开关 / 手势注入 / 补帧（状态与帧经 PUSH 通道 phone_state / phone_frame 回推） */
+  PHONE_OPEN: "desktop:phoneOpen",
+  PHONE_CLOSE: "desktop:phoneClose",
+  PHONE_TAP: "desktop:phoneTap",
+  PHONE_SWIPE: "desktop:phoneSwipe",
+  PHONE_KEY: "desktop:phoneKey",
+  PHONE_REFRESH: "desktop:phoneRefresh",
   /** 主进程 → 渲染进程：流式推送 WireEvent（由 desktop-display connector 产生） */
   PUSH: "desktop:push",
 } as const;

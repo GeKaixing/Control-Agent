@@ -26,6 +26,7 @@ const CH = {
   SET_MSG_WINDOW: "desktop:setMsgWindow",
   SET_LOCAL_PREVIEW: "desktop:setLocalPreview",
   SET_ALWAYS_ON_TOP: "desktop:setAlwaysOnTop",
+  CHOOSE_WORKSPACE_CWD: "desktop:chooseWorkspaceCwd",
   PAUSE: "desktop:pause",
   RESUME: "desktop:resume",
   GET_USAGE: "desktop:getUsage",
@@ -45,6 +46,23 @@ const CH = {
   LIST_SESSIONS: "desktop:listSessions",
   LIST_PERSISTED_SESSIONS: "desktop:listPersistedSessions",
   DELETE_SESSION: "desktop:deleteSession",
+  BROWSER_OPEN: "desktop:browserOpen",
+  BROWSER_CLOSE: "desktop:browserClose",
+  BROWSER_NEW_TAB: "desktop:browserNewTab",
+  BROWSER_CLOSE_TAB: "desktop:browserCloseTab",
+  BROWSER_SWITCH_TAB: "desktop:browserSwitchTab",
+  BROWSER_NAVIGATE: "desktop:browserNavigate",
+  BROWSER_BACK: "desktop:browserBack",
+  BROWSER_FORWARD: "desktop:browserForward",
+  BROWSER_RELOAD: "desktop:browserReload",
+  BROWSER_STOP: "desktop:browserStop",
+  BROWSER_SET_RECT: "desktop:browserSetRect",
+  PHONE_OPEN: "desktop:phoneOpen",
+  PHONE_CLOSE: "desktop:phoneClose",
+  PHONE_TAP: "desktop:phoneTap",
+  PHONE_SWIPE: "desktop:phoneSwipe",
+  PHONE_KEY: "desktop:phoneKey",
+  PHONE_REFRESH: "desktop:phoneRefresh",
   PUSH: "desktop:push",
 };
 
@@ -96,6 +114,9 @@ const api = {
   },
   setAlwaysOnTop(on) {
     return ipcRenderer.invoke(CH.SET_ALWAYS_ON_TOP, on === true);
+  },
+  chooseWorkspaceCwd() {
+    return ipcRenderer.invoke(CH.CHOOSE_WORKSPACE_CWD);
   },
   pause() {
     return ipcRenderer.invoke(CH.PAUSE);
@@ -153,6 +174,57 @@ const api = {
   },
   deleteSession(id) {
     return ipcRenderer.invoke(CH.DELETE_SESSION, id);
+  },
+  browserOpen(url) {
+    return ipcRenderer.invoke(CH.BROWSER_OPEN, typeof url === "string" ? url : null);
+  },
+  browserClose() {
+    return ipcRenderer.invoke(CH.BROWSER_CLOSE);
+  },
+  browserNewTab(url) {
+    return ipcRenderer.invoke(CH.BROWSER_NEW_TAB, typeof url === "string" ? url : null);
+  },
+  browserCloseTab(id) {
+    return ipcRenderer.invoke(CH.BROWSER_CLOSE_TAB, id);
+  },
+  browserSwitchTab(id) {
+    return ipcRenderer.invoke(CH.BROWSER_SWITCH_TAB, id);
+  },
+  browserNavigate(input) {
+    return ipcRenderer.invoke(CH.BROWSER_NAVIGATE, input);
+  },
+  browserBack() {
+    return ipcRenderer.invoke(CH.BROWSER_BACK);
+  },
+  browserForward() {
+    return ipcRenderer.invoke(CH.BROWSER_FORWARD);
+  },
+  browserReload() {
+    return ipcRenderer.invoke(CH.BROWSER_RELOAD);
+  },
+  browserStop() {
+    return ipcRenderer.invoke(CH.BROWSER_STOP);
+  },
+  browserSetRect(rect) {
+    return ipcRenderer.invoke(CH.BROWSER_SET_RECT, rect);
+  },
+  phoneOpen() {
+    return ipcRenderer.invoke(CH.PHONE_OPEN);
+  },
+  phoneClose() {
+    return ipcRenderer.invoke(CH.PHONE_CLOSE);
+  },
+  phoneTap(x, y) {
+    return ipcRenderer.invoke(CH.PHONE_TAP, x, y);
+  },
+  phoneSwipe(x1, y1, x2, y2, durationMs) {
+    return ipcRenderer.invoke(CH.PHONE_SWIPE, x1, y1, x2, y2, durationMs);
+  },
+  phoneKey(keycode) {
+    return ipcRenderer.invoke(CH.PHONE_KEY, keycode);
+  },
+  phoneRefresh() {
+    return ipcRenderer.invoke(CH.PHONE_REFRESH);
   },
   info() {
     return ipcRenderer.invoke(CH.INFO);

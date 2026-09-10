@@ -147,6 +147,13 @@ export function PopoverHost({ id }: { id: string }): React.ReactElement {
               // 窗口置顶在主进程；refresh-info 广播后回显开关
               void window.api.setAlwaysOnTop(on);
             }}
+            workspaceCwd={info.cwd}
+            onPickWorkspaceCwd={async () => {
+              // 目录对话框 + 切换 + 落盘都在主进程；成功后 refresh-info
+              // 广播把新 cwd 回显到「工作目录」行，失败原因就地显示
+              const r = await window.api.chooseWorkspaceCwd();
+              return r.ok ? null : (r.error ?? "切换失败");
+            }}
           />
         );
         break;

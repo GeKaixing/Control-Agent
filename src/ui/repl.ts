@@ -15,6 +15,8 @@
 import type { Agent } from "../agent/agent.js";
 import { deleteSession, listSessions, totalUsage } from "../context/index.js";
 import type { AgentState, MessageQueue } from "../context/index.js";
+import { addCronJob, nextCronRun, readCronJobs, removeCronJob, setCronJobEnabled } from "../cron/index.js";
+import type { CronJob } from "../cron/index.js";
 import type { ModelRef } from "../types.js";
 import type { StreamFn } from "../providers/types.js";
 import { setAskUserHandler, type AskUserFn, type AskUserRequest } from "../tools/ask-user.js";
@@ -298,6 +300,90 @@ async function handleSlashCommand(
         const when = new Date(s.savedAt).toLocaleString("zh-CN", { hour12: false });
         opts.output(`  ${s.id}  ${when}  ${s.nodeCount} 节点${current}\n`);
       }
+      return { exit: false, code: 0 };
+    }
+
+    case "cron": {
+      // 定时任务管理：/cron [list] | /cron add <expr 5 段> <提示词...> | /cron rm|on|off <id>
+      // 表达式按空格分段取前 5 个 token——REPL 里不支持引号包裹（与 CLI 的 add 不同），
+      // 换来的代价是提示词里出现 "0 9 * * *" 这类内容时必须走 CLI 或调整写法。
+      const toks = argument.split(/\s+/).filter((t) => t.length > 0);
+      const sub = toks[0]?.toLowerCase() ?? "list";
+      const cwd = opts.state.cwd;
+
+      if (sub === "list" || sub === "ls") {
+        const jobs = await readCronJobs(cwd);
+        if (jobs.length === 0) {
+          opts.output("  （还没有定时任务）\n");
+          return { exit: false, code: 0 };
+        }
+        opts.output(`  共 ${jobs.length} 个任务：\n`);
+        for (const j of jobs) {
+          opts.output(`  ${j.id}  ${j.expr}${j.enabled ? "" : "（已停用）"}\n`);
+          const nextMs = j.enabled
+            ? j.nextRunAt ?? nextCronRun(j.expr, new Date())?.getTime() ?? null
+            : null;
+          const next = j.enabled
+            ? nextMs === null
+              ? "无（表达式无解）"
+              : new Date(nextMs).toLocaleString("zh-CN", { hour12: false })
+            : "已停用";
+          opts.output(`    下次：${next}｜${j.prompt.replace(/\s+/g, " ").slice(0, 50)}\n`);
+        }
+        return { exit: false, code: 0 };
+      }
+
+      if (sub === "add") {
+        const expr = toks.slice(1, 6).join(" ");
+        const prompt = toks.slice(6).join(" ");
+        const job = await addCronJob(cwd, expr, prompt);
+        if (job === null) {
+          opts.output(
+            "  添加失败：表达式非法或提示词为空。\n  用法：/cron add 0 9 * * * 写日报（5 字段表达式 + 提示词）\n",
+          );
+          return { exit: false, code: 0 };
+        }
+        const next = job.nextRunAt === null ? "无" : new Date(job.nextRunAt).toLocaleString("zh-CN", { hour12: false });
+        opts.output(`  已添加 ${job.id}，下次执行：${next}\n`);
+        return { exit: false, code: 0 };
+      }
+
+      if (sub === "rm" || sub === "del" || sub === "on" || sub === "off") {
+        const prefix = toks[1] ?? "";
+        if (prefix.length === 0) {
+          opts.output(`  用法：/cron ${sub} <id>（id 可只写前缀，/cron 查看清单）\n`);
+          return { exit: false, code: 0 };
+        }
+        const jobs = await readCronJobs(cwd);
+        const matches = jobs.filter((j) => j.id.startsWith(prefix));
+        if (matches.length === 0) {
+          opts.output(`  没有匹配的任务：${prefix}\n`);
+          return { exit: false, code: 0 };
+        }
+        if (matches.length > 1) {
+          opts.output(`  前缀不唯一（${matches.length} 个匹配），请写更长的 id：\n`);
+          for (const m of matches) opts.output(`  ${m.id}\n`);
+          return { exit: false, code: 0 };
+        }
+        const target: CronJob = matches[0]!;
+        if (sub === "rm" || sub === "del") {
+          const okDel = await removeCronJob(cwd, target.id);
+          opts.output(okDel ? `  已删除任务 ${target.id}\n` : `  删除失败：${target.id}\n`);
+        } else {
+          const updated = await setCronJobEnabled(cwd, target.id, sub === "on");
+          if (updated === null) {
+            opts.output(`  任务不存在：${target.id}\n`);
+          } else {
+            const next = updated.nextRunAt === null ? "无" : new Date(updated.nextRunAt).toLocaleString("zh-CN", { hour12: false });
+            opts.output(updated.enabled ? `  已启用 ${updated.id}，下次执行：${next}\n` : `  已停用 ${updated.id}\n`);
+          }
+        }
+        return { exit: false, code: 0 };
+      }
+
+      opts.output(
+        "  用法：/cron [list]｜/cron add <expr> <提示词>｜/cron rm <id>｜/cron on|off <id>\n",
+      );
       return { exit: false, code: 0 };
     }
 

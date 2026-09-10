@@ -2,8 +2,9 @@
  * computer 工具：鼠标 / 键盘操作端（Computer Use 通道的执行器）。
  * 设计对标 UI-TARS-desktop SDK 的 Operator.execute()：
  * 模型看 screenshot 输出像素坐标（相对截图左上角），本工具负责换算成
- * 屏幕坐标并执行。动作空间收敛为 6 个：click / doubleClick /
- * rightClick / type / hotkey / scroll。
+ * 屏幕坐标并执行。动作空间：click / doubleClick / rightClick / type /
+ * hotkey / scroll / drag / focus 八个。应用启动/进程管理不在此列——
+ * bash 已是通用通道（start / tasklist），按消失之问不加。
  *
  * 平台后端（均零 npm 依赖）：
  * - Windows：PowerShell P/Invoke user32；坐标 = 虚拟屏物理像素（加原点偏移）。
@@ -22,7 +23,7 @@ import { promisify } from "node:util";
 import type { JsonSchema } from "../providers/types.js";
 import type { Tool } from "./types.js";
 import { fail, ok } from "./types.js";
-import { macClickScript, macHotkeyScript, macPasteScript, macScrollScript, mapMacHotkey, runJxa } from "./darwin-cu.js";
+import { macClickScript, macDragScript, macFocusScript, macHotkeyScript, macPasteScript, macScrollScript, mapMacHotkey, runJxa } from "./darwin-cu.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -51,6 +52,47 @@ const SCROLL_SCRIPT = `${COMMON_PRELUDE}
 [NativeInput]::SetCursorPos($px, $py) | Out-Null
 Start-Sleep -Milliseconds 80
 [NativeInput]::mouse_event(0x0800, 0, 0, [int]$env:CA_DELTA, [UIntPtr]::Zero)`;
+
+/** 拖拽：起点左键按下 → 14 步插值移动（拖拽类操作对瞬时大位移不友好）→ 终点松开 */
+const DRAG_SCRIPT = `${COMMON_PRELUDE}
+[NativeInput]::SetCursorPos($px, $py) | Out-Null
+Start-Sleep -Milliseconds 100
+[NativeInput]::mouse_event(2,0,0,0,[UIntPtr]::Zero)
+Start-Sleep -Milliseconds 150
+$x2 = [int]$env:CA_X2 + $b.X
+$y2 = [int]$env:CA_Y2 + $b.Y
+for ($i = 1; $i -le 14; $i++) {
+  $cx = $px + [int](($x2 - $px) * $i / 14)
+  $cy = $py + [int](($y2 - $py) * $i / 14)
+  [NativeInput]::SetCursorPos($cx, $cy) | Out-Null
+  Start-Sleep -Milliseconds 20
+}
+Start-Sleep -Milliseconds 120
+[NativeInput]::mouse_event(4,0,0,0,[UIntPtr]::Zero)`;
+
+/**
+ * 激活窗口：EnumWindows 按标题子串（不区分大小写）找第一个可见窗口，
+ * 最小化则先还原（SW_RESTORE=9），再 SetForegroundWindow 置前。
+ * 标题经 env 传入，脚本本身是固定字符串，无注入面。
+ */
+const FOCUS_SCRIPT = `
+$ErrorActionPreference = "Stop"
+Add-Type -TypeDefinition "using System; using System.Runtime.InteropServices; using System.Text; public class WinFocus { public delegate bool EnumProc(IntPtr h, IntPtr l); [DllImport(\\"user32.dll\\")] public static extern bool EnumWindows(EnumProc cb, IntPtr l); [DllImport(\\"user32.dll\\")] public static extern int GetWindowText(IntPtr h, StringBuilder t, int c); [DllImport(\\"user32.dll\\")] public static extern bool IsWindowVisible(IntPtr h); [DllImport(\\"user32.dll\\")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport(\\"user32.dll\\")] public static extern bool ShowWindow(IntPtr h, int cmd); [DllImport(\\"user32.dll\\")] public static extern bool IsIconic(IntPtr h); }"
+$title = $env:CA_TITLE.ToLower()
+$script:found = [IntPtr]::Zero
+$cb = [WinFocus+EnumProc]{ param($h, $l)
+  if ([WinFocus]::IsWindowVisible($h)) {
+    $sb = New-Object System.Text.StringBuilder 512
+    [WinFocus]::GetWindowText($h, $sb, 512) | Out-Null
+    if ($sb.ToString().ToLower().Contains($title)) { $script:found = $h; return $false }
+  }
+  return $true
+}
+[WinFocus]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
+if ($script:found -eq [IntPtr]::Zero) { throw "未找到标题包含 '$title' 的可见窗口" }
+if ([WinFocus]::IsIconic($script:found)) { [WinFocus]::ShowWindow($script:found, 9) | Out-Null; Start-Sleep -Milliseconds 150 }
+Start-Sleep -Milliseconds 80
+[WinFocus]::SetForegroundWindow($script:found) | Out-Null`;
 
 const TYPE_SCRIPT = `${COMMON_PRELUDE}
 if ($env:CA_CONTENT.Length -gt 0) {
@@ -107,10 +149,17 @@ const PARAMETERS: JsonSchema = {
     action: {
       type: "string",
       description:
-        "click / doubleClick / rightClick / type / hotkey / scroll。type 前先 click 输入框；type 使用剪贴板粘贴，会覆盖当前剪贴板。",
+        "click / doubleClick / rightClick / type / hotkey / scroll / drag / focus。" +
+        "type 前先 click 输入框；type 使用剪贴板粘贴，会覆盖当前剪贴板。",
     },
     x: { type: "number", description: "像素横坐标（相对最近一次 screenshot 图片的左上角）" },
     y: { type: "number", description: "像素纵坐标（同上）" },
+    x2: { type: "number", description: "drag 终点横坐标（坐标系同 x/y）" },
+    y2: { type: "number", description: "drag 终点纵坐标（坐标系同 x/y）" },
+    title: {
+      type: "string",
+      description: "focus 的目标名称子串：Windows 匹配窗口标题，macOS 匹配应用/进程名",
+    },
     content: { type: "string", description: "type 的输入内容；以 \\n 结尾时输入后按回车" },
     keys: { type: "string", description: "hotkey 的组合键，空格分隔小写，如 'ctrl c'、'alt tab'、'ctrl shift t'。最多 3 键。" },
     direction: { type: "string", enum: ["up", "down"], description: "scroll 方向" },
@@ -142,7 +191,11 @@ export const computerTool: Tool = {
             ? `hotkey(${String(args["keys"])})`
             : action === "scroll"
               ? `scroll(${String(args["direction"] ?? "down")}, x=${x}, y=${y})`
-              : `${action}(x=${x}, y=${y})`;
+              : action === "drag"
+                ? `drag(x=${x}, y=${y} → x=${Math.round(Number(args["x2"] ?? 0))}, y=${Math.round(Number(args["y2"] ?? 0))})`
+                : action === "focus"
+                  ? `focus(${JSON.stringify(String(args["title"] ?? ""))})`
+                  : `${action}(x=${x}, y=${y})`;
 
       if (process.platform === "darwin") {
         await execMacAction(action, args, ctx.signal);
@@ -209,6 +262,21 @@ async function execMacAction(
       await runJxa(macScrollScript(), { CA_LINES: String(dir * 3 * amount) }, signal);
       return;
     }
+    case "drag": {
+      if (args["x"] === undefined || args["y"] === undefined || args["x2"] === undefined || args["y2"] === undefined) {
+        throw new Error("drag 需要 x/y（起点）与 x2/y2（终点）坐标（来自 screenshot 图片）。");
+      }
+      const x2 = Math.round(Number(args["x2"]));
+      const y2 = Math.round(Number(args["y2"]));
+      await runJxa(macDragScript(), { ...coordEnv, CA_X2: String(x2), CA_Y2: String(y2) }, signal);
+      return;
+    }
+    case "focus": {
+      const title = String(args["title"] ?? "");
+      if (title.length === 0) throw new Error("focus 需要 title 参数（应用/进程名子串）。");
+      await runJxa(macFocusScript(), { CA_TITLE: title }, signal);
+      return;
+    }
     default:
       throw new Error(`未知 action：${action}`);
   }
@@ -267,6 +335,22 @@ async function execWinAction(
       const amount = Number(args["amount"] ?? 3);
       env["CA_DELTA"] = String(args["direction"] === "up" ? 120 * amount : -120 * amount);
       script = SCROLL_SCRIPT;
+      break;
+    }
+    case "drag": {
+      if (args["x"] === undefined || args["y"] === undefined || args["x2"] === undefined || args["y2"] === undefined) {
+        throw new Error("drag 需要 x/y（起点）与 x2/y2（终点）坐标（来自 screenshot 图片）。");
+      }
+      env["CA_X2"] = String(Math.round(Number(args["x2"])));
+      env["CA_Y2"] = String(Math.round(Number(args["y2"])));
+      script = DRAG_SCRIPT;
+      break;
+    }
+    case "focus": {
+      const title = String(args["title"] ?? "");
+      if (title.length === 0) throw new Error("focus 需要 title 参数（窗口标题子串）。");
+      env["CA_TITLE"] = title;
+      script = FOCUS_SCRIPT;
       break;
     }
     default:

@@ -258,6 +258,73 @@ export async function readGitSnapshot(
   }
 }
 
+export interface AdbDevice {
+  serial: string;
+  /** adb 原始状态：device / offline / unauthorized / bootloader ... */
+  state: string;
+}
+
+export interface AdbSnapshot {
+  devices: AdbDevice[];
+}
+
+/**
+ * 解析 `adb devices` 的输出为设备列表（纯函数，可测）。
+ * 只认 `serial\tstate` 形态的行；daemon 启动告警与表头自然被过滤（无 tab）。
+ */
+export function parseAdbDevices(stdout: string): AdbDevice[] {
+  const devices: AdbDevice[] = [];
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const tab = line.indexOf("\t");
+    if (tab <= 0) continue;
+    const serial = line.slice(0, tab).trim();
+    const state = line.slice(tab + 1).trim().split(/\s+/)[0] ?? "";
+    if (serial.length === 0 || state.length === 0) continue;
+    devices.push({ serial, state });
+  }
+  return devices;
+}
+
+/** 把 adb 快照压成一行环境事实（无设备时也提示 adb 可用——模型该知道这条通道存在） */
+export function formatAdbSnapshotLine(snap: AdbSnapshot): string {
+  if (snap.devices.length === 0) {
+    return "[环境快照] adb 可用，但当前未检测到 Android 设备（真机需 USB 连接并开启 USB 调试；模拟器可 adb connect 127.0.0.1:端口）";
+  }
+  const usable = snap.devices.filter((d) => d.state === "device");
+  const blocked = snap.devices.filter((d) => d.state !== "device");
+  const parts = [
+    `[环境快照] adb 检测到 ${snap.devices.length} 台已连接的 Android 设备：` +
+      snap.devices.map((d) => `${d.serial}(${d.state})`).join("、"),
+  ];
+  if (usable.length > 0) {
+    parts.push("已授权设备可用 bash 直接跑 adb 命令操作手机（如 adb shell am start 启动 App、adb shell input 点按）");
+  }
+  if (blocked.length > 0) {
+    parts.push("未授权设备需在手机上确认 USB 调试授权弹窗");
+  }
+  return parts.join("；");
+}
+
+/**
+ * Environment 支柱：探测 adb 与已连接的 Android 设备，给模型注入
+ * 「手机操作走 adb 文本通道」的事实。adb 未安装 / 超时 → null（静默跳过，
+ * 与 readGitSnapshot 同一套降级约定）。
+ */
+export async function readAdbSnapshot(timeoutMs = 2_000): Promise<AdbSnapshot | null> {
+  try {
+    const stdout = await new Promise<string>((resolve, reject) => {
+      execFile("adb", ["devices"], { timeout: timeoutMs, windowsHide: true }, (err, out) => {
+        if (err) reject(err);
+        else resolve(out);
+      });
+    });
+    return { devices: parseAdbDevices(stdout) };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 把 cwd / 模型 spec / 提示词选项组装成 AgentState + Queue + ResolvedModel。
  * 桌面端与 CLI 都从这里起手。
@@ -301,9 +368,10 @@ export async function assembleSession(opts: AssembleOptions): Promise<AssembledS
         ? `${appendSystemPrompt}\n\n${memory}`
         : memory;
     }
-    // Environment 支柱：git 环境快照（非 git 仓库静默跳过）。
-    // 只给事实不给规则——模型看到分支与未提交数，自然知道动手前要谨慎
-    const snap = await readGitSnapshot(opts.cwd);
+    // Environment 支柱：git 环境快照 + adb 设备探测（各自静默降级）。
+    // 只给事实不给规则——模型看到分支/未提交数自然知道谨慎；
+    // 看到已连接设备自然知道手机操作有 adb 文件通道可用。
+    const [snap, adb] = await Promise.all([readGitSnapshot(opts.cwd), readAdbSnapshot()]);
     if (snap !== null) {
       const envLine =
         `[环境快照] git 分支 ${snap.branch}，` +
@@ -313,6 +381,12 @@ export async function assembleSession(opts: AssembleOptions): Promise<AssembledS
       appendSystemPrompt = appendSystemPrompt.length > 0
         ? `${appendSystemPrompt}\n\n${envLine}`
         : envLine;
+    }
+    if (adb !== null) {
+      const adbLine = formatAdbSnapshotLine(adb);
+      appendSystemPrompt = appendSystemPrompt.length > 0
+        ? `${appendSystemPrompt}\n\n${adbLine}`
+        : adbLine;
     }
   }
 
