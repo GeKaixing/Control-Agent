@@ -10,6 +10,8 @@ import { globTool } from "./glob.js";
 import { grepTool } from "./grep.js";
 import { memoryTool } from "./memory.js";
 import { mobileActTool, mobileScreenTool, mobileUiTool } from "./mobile.js";
+import { phonePanelTool } from "./phone-panel.js";
+import { procedureTool } from "./procedure.js";
 import { readTool } from "./read.js";
 import { screenshotTool } from "./screenshot.js";
 import { uiaTreeTool } from "./uia.js";
@@ -34,12 +36,14 @@ const _registry = {
   glob: globTool,
   grep: grepTool,
   memory: memoryTool,
+  procedure: procedureTool,
   screenshot: screenshotTool,
   computer: computerTool,
   uia_tree: uiaTreeTool,
   mobile_screen: mobileScreenTool,
   mobile_ui: mobileUiTool,
   mobile_act: mobileActTool,
+  phone_panel: phonePanelTool,
   browser_navigate: browserNavigateTool,
   browser_read: browserReadTool,
   browser_screenshot: browserScreenshotTool,
@@ -84,8 +88,10 @@ export function describeToolsForModel(tools: Tool[] = allTools): LlmTool[] {
 }
 
 export type { Tool, ToolContext, ToolResult } from "./types.js";
-export { askUserTool, bashTool, browserCookieTool, browserEvaluateTool, browserFileTool, browserInputTool, browserInterceptTool, browserNavigateTool, browserNetworkTool, browserReadTool, browserScreenshotTool, browserTabsTool, browserWaitTool, computerTool, editTool, globTool, grepTool, memoryTool, mobileActTool, mobileScreenTool, mobileUiTool, readTool, screenshotTool, uiaTreeTool, writeTool, resolveShell };
+export { askUserTool, bashTool, browserCookieTool, browserEvaluateTool, browserFileTool, browserInputTool, browserInterceptTool, browserNavigateTool, browserNetworkTool, browserReadTool, browserScreenshotTool, browserTabsTool, browserWaitTool, computerTool, editTool, globTool, grepTool, memoryTool, mobileActTool, mobileScreenTool, mobileUiTool, phonePanelTool, procedureTool, readTool, screenshotTool, uiaTreeTool, writeTool, resolveShell };
 export { setAskUserHandler, type AskUserFn, type AskUserRequest } from "./ask-user.js";
 export { setBrowserBackend, type BrowserBackend, type BrowserInputSpec, type BrowserPageSnapshot, type BrowserScreenshot, type BrowserTabEntry, type BrowserWaitSpec, type CookieEntry, type CookieSpec, type DownloadEntry, type InterceptRule, type NetworkBody, type NetworkEntry } from "./browser.js";
+export { setPhonePanelBackend, type PhonePanelBackend } from "./phone-panel.js";
 export { memoryPath, MEMORY_FILE } from "./memory.js";
+export { procedureFile, PROCEDURE_MAX_ENTRIES, parseProcedures, upsertProcedure, formatProcedureIndex, type ProcedureEntry } from "./procedure.js";
 export type { ShellSpec };

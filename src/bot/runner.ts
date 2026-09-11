@@ -3,7 +3,7 @@
  *
  * 职责边界：
  *  - per-chat 会话隔离：每个 chatId 一套 AssembledSession（state + queue + stream），
- *    会话 id 固定为 bot_<platform>_<sanitized chatId>，落 .c-agent/sessions/，
+ *    会话 id 固定为 bot_<platform>_<sanitized chatId>，落 .control-agent/sessions/，
  *    重启自动续聊（同 CLI --resume 的存储，不另造索引）。
  *  - 同聊天串行、跨聊天并发：per-chat promise 链排队；运行中的新消息走
  *    MessageQueue 的 followUps 通道，由 Agent 外层循环在同一 run 内合并。

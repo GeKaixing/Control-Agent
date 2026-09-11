@@ -93,7 +93,7 @@ export interface AgentOptions {
   autoCompact?: boolean;
   /**
    * 会话持久化（Context 支柱）：每次 run() 结束（agent_end）后把会话树整体
-   * 落盘到 .c-agent/sessions/<id>.json，--resume 可整体还原（含 compact 旧分支）。
+   * 落盘到 .control-agent/sessions/<id>.json，--resume 可整体还原（含 compact 旧分支）。
    * 默认关闭；CLI 交互模式开启，print 单轮与桌面端自行决定。
    */
   persistSessions?: boolean;

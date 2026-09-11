@@ -28,6 +28,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { DATA_DIR, migrateDataDir } from "../paths.js";
 
 import qrcodeTerminal from "qrcode-terminal";
 
@@ -249,7 +250,7 @@ export interface WeixinAdapterOptions {
   token?: string;
   /** 白名单：sender id 或会话 id 精确匹配；省略 = 私聊全回 */
   allow?: ReadonlySet<string>;
-  /** 凭据与游标的存储根目录；默认 <cwd>/.c-agent/weixin */
+  /** 凭据与游标的存储根目录；默认 <cwd>/.control-agent/weixin */
   stateDir?: string;
   /** true = 忽略已存凭据，强制重新扫码 */
   forceLogin?: boolean;
@@ -282,7 +283,9 @@ export class WeixinAdapter implements BotAdapter {
   constructor(opts: WeixinAdapterOptions = {}) {
     this.allow = opts.allow;
     this.log = opts.log ?? ((line) => console.log(line));
-    this.stateDir = opts.stateDir ?? path.join(process.cwd(), ".c-agent", "weixin");
+    // 默认 stateDir 挂迁移钩子：旧 .c-agent/weixin 凭据（免扫码登录态）先挪过来
+    migrateDataDir(process.cwd());
+    this.stateDir = opts.stateDir ?? path.join(process.cwd(), DATA_DIR, "weixin");
     this.forceLogin = opts.forceLogin ?? false;
     this.accountId = opts.accountId ?? process.env.WEIXIN_ACCOUNT_ID;
     this.token = opts.token ?? process.env.WEIXIN_TOKEN;
@@ -683,7 +686,7 @@ const HELP = [
   "  --login                忽略已存凭据，强制重新扫码",
   "  --help                 本帮助",
   "",
-  "首跑会显示二维码，用微信扫码并在微信里确认即可；凭据存 .c-agent/weixin/，重启免扫码。",
+  "首跑会显示二维码，用微信扫码并在微信里确认即可；凭据存 .control-agent/weixin/，重启免扫码。",
 ].join("\n");
 
 async function main(): Promise<void> {

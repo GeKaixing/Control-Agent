@@ -49,6 +49,8 @@ import {
 } from "../../src/context/index.js";
 import type { WireEvent } from "../shared/api.js";
 import { setBrowserBackend } from "../../src/tools/browser.js";
+import { setPhonePanelBackend } from "../../src/tools/phone-panel.js";
+import { migrateDataDir } from "../../src/paths.js";
 import { initFileLogging, log } from "../../src/log/index.js";
 
 interface StartDeps {
@@ -848,6 +850,8 @@ async function resolveSessionCwd(): Promise<string> {
 }
 
 async function bootstrap(deps: StartDeps): Promise<void> {
+  // 数据目录迁移先于日志初始化（同 CLI 入口的理由）：app home 的 .c-agent → .control-agent
+  migrateDataDir(process.cwd());
   // 文件日志：与 CLI 入口（src/index.ts）接同一条落盘通道。锚 process.cwd()
   // （app home）而非 sessionCwd——会话工作目录可在运行中切换，app home 稳定，
   // 且 config.json / connectors 已锚这里，日志跟它们同址便于排障。
@@ -898,7 +902,7 @@ async function bootstrap(deps: StartDeps): Promise<void> {
     contents.on("will-navigate", (e) => e.preventDefault());
   });
 
-  // 模型持久化（与 CLI 共用 .c-agent/config.json，单一持久化出口）：
+  // 模型持久化（与 CLI 共用 .control-agent/config.json，单一持久化出口）：
   // MODEL env 显式设置时不读持久值（优先级与 CLI 一致）；spec 与自定义模型
   // 完整参数互斥存同一文件（最后一次的选择是唯一真相），读到的交给
   // SessionManager 恢复，缺 key 会降级 mock，UI 的模型标签如实显示。
@@ -1002,7 +1006,7 @@ async function bootstrap(deps: StartDeps): Promise<void> {
           ? { contextWindow: String(savedCustomModel.contextWindow) }
           : {}),
       });
-      console.error(`提示：模型沿用持久配置（自定义模型 ${savedCustomModel.id}，.c-agent/config.json）`);
+      console.error(`提示：模型沿用持久配置（自定义模型 ${savedCustomModel.id}，.control-agent/config.json）`);
     } catch (err: unknown) {
       console.error(
         `[session] 恢复自定义模型失败，回退默认：${err instanceof Error ? err.message : String(err)}`,
@@ -1027,6 +1031,26 @@ async function bootstrap(deps: StartDeps): Promise<void> {
   // agent 的内部浏览器控制通道：browser_* 工具的后端。闭包实时读当前面板，
   // 面板开关多次无需重注。CLI / print 端不注入 → 工具优雅 fail。
   setBrowserBackend(BrowserPanel.browserBackend());
+
+  // agent 的手机镜像面板通道：phone_panel 工具的后端。open() 与 PHONE_OPEN
+  // IPC 同一套互斥逻辑（关浏览器面板 + 撑窗口高度）。
+  setPhonePanelBackend({
+    async open() {
+      if (mainWindow === null || mainWindow.isDestroyed()) {
+        throw new Error("主窗口不可用，无法打开手机镜像面板");
+      }
+      BrowserPanel.close();
+      PhoneMirror.open();
+      ensureBrowserWindowHeight();
+    },
+    async close() {
+      PhoneMirror.close();
+    },
+    async status() {
+      const s = PhoneMirror.state();
+      return { open: s.open, connected: s.connected, device: s.device };
+    },
+  });
 
   await createWindow(deps);
 

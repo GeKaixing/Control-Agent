@@ -4151,7 +4151,7 @@ test("config: saveWorkspaceCwd 写入 / 清除，且不抹掉模型配置", asyn
 
 test("config: 损坏 / 版本不识别 / model 字段缺失的 config.json 返回 null", async () => {
   const dir = await tempDir();
-  const configFile = path.join(dir, ".c-agent", "config.json");
+  const configFile = path.join(dir, ".control-agent", "config.json");
   await fs.mkdir(path.dirname(configFile), { recursive: true });
 
   await fs.writeFile(configFile, "{not json", "utf8");
@@ -4210,7 +4210,7 @@ test("config: saveCustomModel / readSavedCustomModel 往返；spec 与 customMod
 
 test("config: 字段不完整的 customModel 视为损坏返回 null", async () => {
   const dir = await tempDir();
-  const configFile = path.join(dir, ".c-agent", "config.json");
+  const configFile = path.join(dir, ".control-agent", "config.json");
   await fs.mkdir(path.dirname(configFile), { recursive: true });
 
   await fs.writeFile(

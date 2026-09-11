@@ -78,7 +78,7 @@ export function PhonePanel(): React.ReactElement {
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border px-3">
         <span className="text-xs font-medium text-foreground">手机镜像</span>
         <span className={`text-xs ${connected ? "text-muted-foreground" : "text-destructive"}`}>
-          {connected ? "已连接" : "未检测到设备（请启动 MuMu 模拟器）"}
+          {connected ? "已连接" : "未检测到设备（启动安卓模拟器或接入 USB 真机）"}
         </span>
         <div className="flex-1" />
         <PhoneButton label="刷新" onClick={() => void window.api.phoneRefresh()} />
@@ -100,7 +100,7 @@ export function PhonePanel(): React.ReactElement {
         ) : (
           <div className="flex flex-col items-center gap-2 text-muted-foreground">
             <span className="text-sm">等待手机画面…</span>
-            <span className="text-xs">启动 MuMu 模拟器后画面会自动出现，无需重启面板</span>
+            <span className="text-xs">启动安卓模拟器（MuMu / 雷电 / 夜神 / 蓝叠）或接入真机后，画面会自动出现，无需重启面板</span>
           </div>
         )}
       </div>

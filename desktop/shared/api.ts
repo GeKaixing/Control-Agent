@@ -96,7 +96,7 @@ export type WireEvent =
     }
   /**
    * 手机镜像面板状态广播（与 browser_state 同模式：主进程折算全量快照）。
-   * connected=false = adb 探测不到设备（MuMu 未启动 / 真机未插线），
+   * connected=false = adb 探测不到设备（模拟器未启动 / 真机未插线），
    * 面板仍保持打开并展示提示，设备恢复后帧自动续上。
    */
   | { t: "phone_state"; open: boolean; connected: boolean; device: string | null }
@@ -350,7 +350,7 @@ export interface ListSessionsResult {
 }
 
 /**
- * 磁盘上的持久化会话（.c-agent/sessions/<id>.json）单条信息。
+ * 磁盘上的持久化会话（.control-agent/sessions/<id>.json）单条信息。
  * 「历史会话」区数据源——与内存标签页（ListSessionsResult）是两个集合：
  * 前者是落盘文件（含 CLI / 之前退出时写下的），后者是本窗口开着的标签页。
  */
@@ -494,7 +494,7 @@ export interface DesktopApi {
   /** 会话清单：当前位置 + 总数 + 各会话标题（「选择会话」popover 用）。 */
   listSessions(): Promise<ListSessionsResult>;
   /**
-   * 磁盘上的持久化会话清单（.c-agent/sessions/，新的在前；含 CLI 与
+   * 磁盘上的持久化会话清单（.control-agent/sessions/，新的在前；含 CLI 与
    * 之前退出时落盘的会话）。「历史会话」区数据源。
    */
   listPersistedSessions(): Promise<PersistedSessionInfo[]>;

@@ -18,6 +18,7 @@ import { ConnectorRuntime } from "./connector/runtime/connector-runtime.js";
 import { handleCronCommand } from "./cron/cli.js";
 import { CronScheduler, readCronJobs } from "./cron/index.js";
 import type { StreamFn } from "./providers/types.js";
+import { migrateDataDir } from "./paths.js";
 import { initFileLogging, log } from "./log/index.js";
 import { assembleSession, buildSeedMessages, resolveModelSpec } from "./session.js";
 import type { ModelRef } from "./types.js";
@@ -31,12 +32,12 @@ const HELP = [
   "命令：",
   "  /help              显示本帮助",
   "  /model <provider:id>   切换模型，如 /model openai:gpt-4o-mini、/model anthropic:claude-3-7-sonnet-latest",
-  "                      切换会持久保存到 .c-agent/config.json，下次启动默认沿用",
+  "                      切换会持久保存到 .control-agent/config.json，下次启动默认沿用",
   "  /tools             列出可用工具",
   "  /usage             显示本次会话的 token 用量",
   "  /clear             清空对话历史",
   "  /compact           把对话历史压缩成模型摘要（旧分支保留，可回溯）",
-  "  /sessions          列出已持久化的会话（.c-agent/sessions/）",
+  "  /sessions          列出已持久化的会话（.control-agent/sessions/）",
   "  /sessions rm <id>  删除指定会话（id 可只写前缀，当前会话不可删）",
   "  /verbose           切换是否显示思考过程",
   "  /exit              退出（也可用 Ctrl-D）",
@@ -66,9 +67,9 @@ const HELP = [
   "                            省略 id 时恢复最近一次。交互模式每轮结束自动保存。",
   "",
   "模型持久化：",
-  "  启动时模型来源优先级：--model 参数 > MODEL 环境变量 > .c-agent/config.json",
+  "  启动时模型来源优先级：--model 参数 > MODEL 环境变量 > .control-agent/config.json",
   "  保存值 > 内置默认。--model 是一次性覆盖，不写入配置；想改默认用 /model 切换，",
-  "  想清掉持久值就删 .c-agent/config.json。",
+  "  想清掉持久值就删 .control-agent/config.json。",
   "",
   "输出渲染：",
   "  --no-markdown                原样输出 Markdown 源码，不做终端渲染",
@@ -88,7 +89,7 @@ const HELP = [
   "  到点任务会作为一条 [定时任务] 消息注入当前会话执行。",
   "",
   "日志：",
-  "  运行日志写入 <cwd>/.c-agent/logs/（按天一份，保留最近 7 份）。",
+  "  运行日志写入 <cwd>/.control-agent/logs/（按天一份，保留最近 7 份）。",
   "  环境变量 C_AGENT_LOG=debug|info|warn|error|off 调整详细度（默认 info）。",
 ].join("\n");
 
@@ -255,6 +256,9 @@ async function main(): Promise<number> {
 
   const cwd = path.resolve(args.cwd ?? process.cwd());
 
+  // 数据目录迁移先于一切 IO（含日志初始化）——否则日志先建新目录，rename 会因目标已存在而卡住
+  migrateDataDir(cwd);
+
   // 文件日志先开：后面的模型解析、会话恢复出错才有地方查
   initFileLogging(cwd);
 
@@ -285,7 +289,7 @@ async function main(): Promise<number> {
   const connectorRuntime = new ConnectorRuntime({ cwd });
   const connectorSummary = await bootstrapConnectors(connectorRuntime, args.connectorsPaths);
 
-  // 模型来源优先级：--model 参数 > MODEL env（defaultModel 内处理）> .c-agent/config.json
+  // 模型来源优先级：--model 参数 > MODEL env（defaultModel 内处理）> .control-agent/config.json
   // 持久值 > 内置默认。持久值由 REPL /model 切换或桌面端选模型时写入（spec 与
   // 自定义模型完整参数互斥，最后一次的选择是唯一真相），让选择跨进程生效；
   // --model 是一次性覆盖，不落盘（脚本里 --model mock 不该污染用户配置）。
@@ -295,7 +299,7 @@ async function main(): Promise<number> {
     const saved = await readSavedModelSpec(cwd);
     if (saved !== null) {
       modelSpec = saved;
-      console.error(`提示：模型沿用持久配置 ${saved}（.c-agent/config.json，--model / MODEL env 可覆盖）`);
+      console.error(`提示：模型沿用持久配置 ${saved}（.control-agent/config.json，--model / MODEL env 可覆盖）`);
     } else {
       // 最后一次选的是自定义模型（完整参数自描述，CLI 同样恢复）
       const custom = await readSavedCustomModel(cwd);
@@ -307,7 +311,7 @@ async function main(): Promise<number> {
           apiKey: custom.apiKey,
           ...(custom.contextWindow !== undefined ? { contextWindow: custom.contextWindow } : {}),
         };
-        console.error(`提示：模型沿用持久配置（自定义模型 ${custom.id}，.c-agent/config.json）`);
+        console.error(`提示：模型沿用持久配置（自定义模型 ${custom.id}，.control-agent/config.json）`);
       }
     }
   }
@@ -334,7 +338,7 @@ async function main(): Promise<number> {
   if (args.resume !== undefined) {
     const id = typeof args.resume === "string" ? args.resume : await latestSessionId(cwd);
     if (id === null) {
-      console.error("提示：没有可恢复的会话（.c-agent/sessions/ 为空），按全新会话启动");
+      console.error("提示：没有可恢复的会话（.control-agent/sessions/ 为空），按全新会话启动");
     } else if (await loadSessionInto(state, cwd, id)) {
       console.error(`已恢复会话 ${id}（${state.messages.length} 条消息）`);
     } else {

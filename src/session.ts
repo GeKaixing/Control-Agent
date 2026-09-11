@@ -14,7 +14,9 @@ import { createInitialState, MessageQueue, type AgentState } from "./context/ind
 import type { ResolvedModel } from "./providers/index.js";
 import { defaultModel, parseModelSpec, resolveModel } from "./providers/index.js";
 import { allTools, type Tool } from "./tools/index.js";
+import { resolveAdbEntries } from "./tools/mobile.js";
 import { truncateText } from "./tools/fs-utils.js";
+import { formatProcedureIndex, procedureFile } from "./tools/procedure.js";
 import type { ModelRef } from "./types.js";
 
 /**
@@ -94,7 +96,7 @@ export interface AssembleOptions {
    */
   maxTokens?: number;
   /**
-   * 是否把 cwd 下的跨会话记忆（.c-agent/memory.md，此前会话由模型通过 memory
+   * 是否把 cwd 下的跨会话记忆（.control-agent/memory.md，此前会话由模型通过 memory
    * 工具记下）注入系统提示词。默认 true。显式传 systemPrompt 时不注入（完全替换语义优先）。
    */
   includeProjectMemory?: boolean;
@@ -221,6 +223,20 @@ export async function collectProjectMemory(cwd: string): Promise<string> {
   }
 }
 
+/**
+ * Context 支柱：收集程序性记忆（GUI 操作流程）条目索引。
+ * 用户级存储（跨项目共享），只注入索引行——详情模型用 procedure 工具按需 search。
+ * 文件不存在 / 读失败 → 空串（调用方跳过注入）。
+ */
+export async function collectProcedureIndex(): Promise<string> {
+  try {
+    const raw = await fs.readFile(procedureFile(), "utf8");
+    return formatProcedureIndex(raw);
+  } catch {
+    return "";
+  }
+}
+
 export interface GitSnapshot {
   branch: string;
   dirty: boolean;
@@ -266,6 +282,8 @@ export interface AdbDevice {
 
 export interface AdbSnapshot {
   devices: AdbDevice[];
+  /** 已探测到的模拟器 adb 入口别名（mumu / ld / nox / bluestacks；sdk 入口不计入） */
+  emulatorEntries?: string[];
 }
 
 /**
@@ -289,7 +307,12 @@ export function parseAdbDevices(stdout: string): AdbDevice[] {
 /** 把 adb 快照压成一行环境事实（无设备时也提示 adb 可用——模型该知道这条通道存在） */
 export function formatAdbSnapshotLine(snap: AdbSnapshot): string {
   if (snap.devices.length === 0) {
-    return "[环境快照] adb 可用，但当前未检测到 Android 设备（真机需 USB 连接并开启 USB 调试；模拟器可 adb connect 127.0.0.1:端口）";
+    const emus = snap.emulatorEntries ?? [];
+    const extra =
+      emus.length > 0
+        ? `；已检测到模拟器 adb 入口：${emus.join("、")}——mobile_* 工具传 adb=入口名 即可自动连接（多 adb 入口会自动探测合并）`
+        : "";
+    return "[环境快照] adb 可用，但当前未检测到 Android 设备（真机需 USB 连接并开启 USB 调试；模拟器可 adb connect 127.0.0.1:端口" + extra + "）";
   }
   const usable = snap.devices.filter((d) => d.state === "device");
   const blocked = snap.devices.filter((d) => d.state !== "device");
@@ -308,10 +331,17 @@ export function formatAdbSnapshotLine(snap: AdbSnapshot): string {
 
 /**
  * Environment 支柱：探测 adb 与已连接的 Android 设备，给模型注入
- * 「手机操作走 adb 文本通道」的事实。adb 未安装 / 超时 → null（静默跳过，
+ * 「手机操作走 adb 文本通道」的事实。同时探测模拟器自带 adb 入口
+ * （纯文件存在性检查，零执行开销）——PATH adb 缺失但装了模拟器时，
+ * 模型仍知道 mobile_* 通道可用。完全无 adb 痕迹 → null（静默跳过，
  * 与 readGitSnapshot 同一套降级约定）。
  */
 export async function readAdbSnapshot(timeoutMs = 2_000): Promise<AdbSnapshot | null> {
+  // 模拟器入口探测是同步 existsSync，失败返回错误字符串 → 忽略
+  const resolved = resolveAdbEntries("");
+  const emulatorEntries = Array.isArray(resolved)
+    ? resolved.filter((e) => e.name !== "sdk").map((e) => e.name)
+    : [];
   try {
     const stdout = await new Promise<string>((resolve, reject) => {
       execFile("adb", ["devices"], { timeout: timeoutMs, windowsHide: true }, (err, out) => {
@@ -319,9 +349,10 @@ export async function readAdbSnapshot(timeoutMs = 2_000): Promise<AdbSnapshot | 
         else resolve(out);
       });
     });
-    return { devices: parseAdbDevices(stdout) };
+    return { devices: parseAdbDevices(stdout), emulatorEntries };
   } catch {
-    return null;
+    // PATH adb 不可用：但若装了模拟器（自带 adb），仍告知 mobile 通道存在
+    return emulatorEntries.length > 0 ? { devices: [], emulatorEntries } : null;
   }
 }
 
@@ -362,11 +393,17 @@ export async function assembleSession(opts: AssembleOptions): Promise<AssembledS
 
   // Context 支柱：跨会话记忆注入（显式 systemPrompt 时不注入——完全替换语义优先）
   if (opts.systemPrompt === undefined && opts.includeProjectMemory !== false) {
-    const memory = await collectProjectMemory(opts.cwd);
+    const [memory, procIndex] = await Promise.all([collectProjectMemory(opts.cwd), collectProcedureIndex()]);
     if (memory.length > 0) {
       appendSystemPrompt = appendSystemPrompt.length > 0
         ? `${appendSystemPrompt}\n\n${memory}`
         : memory;
+    }
+    // 程序性记忆（GUI 操作流程）索引：只注入标题行索引，详情模型用 procedure 工具按需查
+    if (procIndex.length > 0) {
+      appendSystemPrompt = appendSystemPrompt.length > 0
+        ? `${appendSystemPrompt}\n\n${procIndex}`
+        : procIndex;
     }
     // Environment 支柱：git 环境快照 + adb 设备探测（各自静默降级）。
     // 只给事实不给规则——模型看到分支/未提交数自然知道谨慎；

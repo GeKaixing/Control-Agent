@@ -69,7 +69,7 @@ async function resolveJobId(cwd: string, prefix: string): Promise<string | null>
 /** 前台守护：到点任务无头执行，答案与错误直接写终端。永不正常返回（Ctrl-C 退出） */
 async function runCronDaemon(cwd: string): Promise<number> {
   const jobs = (await readCronJobs(cwd)).filter((j) => j.enabled);
-  console.log(`定时任务守护已启动：${jobs.length} 个启用中（.c-agent/cron/jobs.json），Ctrl-C 退出。`);
+  console.log(`定时任务守护已启动：${jobs.length} 个启用中（.control-agent/cron/jobs.json），Ctrl-C 退出。`);
   if (jobs.length === 0) console.log("提示：还没有启用的任务，用 cron add 添加。");
 
   let busy = false;

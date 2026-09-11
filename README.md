@@ -144,7 +144,7 @@ macOS 后端：`screencapture` + JXA ObjC bridge 发 CGEvent。两端均零 npm 
 2. **压缩**：抹掉较早轮次的思考过程；历史截图替换成占位文本；超长工具结果截断。
 3. **裁剪**：按 token 预算迟滞式整轮丢弃最老对话（触发线 0.85、目标 0.70，对 prompt cache 亲和），保证不拆散 `assistant + toolResult` 结构。
 
-会话持久化在 `.c-agent/sessions/`，`--resume` 还原。运行中的插话不会丢——合并进下一轮
+会话持久化在 `.control-agent/sessions/`，`--resume` 还原。运行中的插话不会丢——合并进下一轮
 工具往返；串行工具间隙发现插话会立即停手，剩余调用标 skipped 回给模型。
 
 ## 架构
@@ -184,7 +184,7 @@ src/
   connector/         Connector 插件运行时（Loader → Registry → Runtime）
   cron/              定时任务：解析 / 调度 / 持久化 / 无头执行
   bot/               微信 Bot：per-chat 会话落盘续聊
-  log/               分级文件日志 → .c-agent/logs/（按天、绝不抛错）
+  log/               分级文件日志 → .control-agent/logs/（按天、绝不抛错）
   ui/                renderer · print · input · repl · markdown
 desktop/
   main/              Electron 主进程（审批门、浏览器面板、手机投屏、tray）

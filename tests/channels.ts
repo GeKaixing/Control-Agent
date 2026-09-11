@@ -8,17 +8,27 @@
  */
 
 import assert from "node:assert/strict";
+import { promises as fs, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
+  ADB_ENTRY_TABLE,
   buildShellCommand,
   formatUiaNodes,
+  mergeAdbScans,
   mobileActTool,
   mobileScreenTool,
   mobileUiTool,
   parseAdbList,
   parseBounds,
   parseUiaDump,
+  resolveAdbEntries,
+  type AdbEntry,
 } from "../src/tools/mobile.js";
 import { formatUiaTree, parseUiaJson } from "../src/tools/uia.js";
+import { parseProcedures, upsertProcedure, formatProcedureIndex, procedureTool } from "../src/tools/procedure.js";
+import { migrateDataDir, DATA_DIR, LEGACY_DATA_DIR } from "../src/paths.js";
+import { phonePanelTool, setPhonePanelBackend, type PhonePanelBackend } from "../src/tools/index.js";
 import {
   browserCookieTool,
   browserFileTool,
@@ -186,6 +196,133 @@ test("mobile_screen / mobile_ui: adb 不可用时优雅失败", async () => {
   assert.equal(typeof ui.isError, "boolean");
 });
 
+// ---------------------------------------------------------------- mobile: adb 多入口
+
+test("mobile: ADB_ENTRY_TABLE 内置四家模拟器入口，路径与端口齐全", () => {
+  for (const key of ["mumu", "ld", "nox", "bluestacks"]) {
+    const spec = ADB_ENTRY_TABLE[key]!;
+    assert.ok(spec.bins.length > 0, `${key} 应有 adb 路径候选`);
+    assert.ok(spec.ports.length > 0, `${key} 应有典型 connect 端口`);
+    assert.ok(spec.bins.every((b) => /adb/i.test(b)), `${key} 的候选都应是 adb 可执行文件`);
+  }
+});
+
+test("mobile: resolveAdbEntries 别名 / 路径 / 非法值三分支", () => {
+  // sdk 别名：单入口，bin 走 env 覆盖或 PATH
+  const sdk = resolveAdbEntries("sdk");
+  assert.ok(Array.isArray(sdk) && sdk.length === 1 && sdk[0]!.name === "sdk");
+
+  // 中文别名与英文别名映射到同一入口（未安装该模拟器时都是同型错误）
+  const cn = resolveAdbEntries("雷电");
+  const en = resolveAdbEntries("ld");
+  assert.equal(typeof cn, typeof en);
+  assert.match(cn as string, /雷电|未找到|可传 adb\.exe/);
+
+  // 未知别名 → 错误说明（含支持的别名列表）
+  const bad = resolveAdbEntries("夜神模拟器plus");
+  assert.equal(typeof bad, "string");
+  assert.match(bad as string, /不认识的 adb 入口/);
+
+  // 路径不存在 → 错误说明
+  const missing = resolveAdbEntries("C:/no/such/dir/adb.exe");
+  assert.equal(typeof missing, "string");
+  assert.match(missing as string, /路径不存在/);
+});
+
+test("mobile: resolveAdbEntries 存在的路径 → custom 入口；缺省探测含 sdk", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "c-agent-adb-"));
+  const fakeBin = path.join(dir, "myadb.exe");
+  await fs.writeFile(fakeBin, "");
+  try {
+    const custom = resolveAdbEntries(fakeBin);
+    assert.ok(Array.isArray(custom) && custom.length === 1);
+    assert.equal(custom[0]!.name, "custom");
+    assert.equal(custom[0]!.bin, fakeBin);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+  // 缺省：sdk 恒在末位兜底（带典型 connect 端口，覆盖非标准安装位置）；
+  // 模拟器入口按机器实际情况排在前面（先到先得，命令原路走模拟器自带 adb）
+  const def = resolveAdbEntries("");
+  assert.ok(Array.isArray(def) && def.length >= 1);
+  const last = def[def.length - 1]!;
+  assert.equal(last.name, "sdk");
+  assert.ok(last.ports.length > 0, "sdk 兜底应带典型 connect 端口");
+});
+
+test("mobile: mergeAdbScans 多入口去重，同 serial 优先保留 device 状态", () => {
+  const sdk: AdbEntry = { name: "sdk", bin: "adb", ports: [] };
+  const mumu: AdbEntry = { name: "mumu", bin: "C:/m/adb.exe", ports: [7555] };
+  const merged = mergeAdbScans([
+    { entry: sdk, devices: [{ serial: "1A2B", state: "unauthorized" }] },
+    { entry: mumu, devices: [{ serial: "1A2B", state: "device" }, { serial: "127.0.0.1:7555", state: "device" }] },
+    { entry: { name: "ld", bin: "C:/l/adb.exe", ports: [5555] }, devices: [] },
+  ]);
+  assert.equal(merged.length, 2);
+  // 同 serial：后到的 device 状态覆盖先到的 unauthorized
+  const first = merged.find((d) => d.serial === "1A2B")!;
+  assert.equal(first.state, "device");
+  assert.equal(first.entry.name, "mumu");
+  assert.equal(merged[1]!.entry.name, "mumu");
+});
+
+test("mobile: adb 参数非法别名 → fail 且不触达任何 adb", async () => {
+  const res = await mobileScreenTool.execute({ adb: "不存在的东西" }, ctx);
+  assert.equal(res.isError, true);
+  assert.match(resultText(res.content), /adb 入口无效/);
+});
+
+// ---------------------------------------------------------------- phone_panel
+
+test("phone_panel: open/close/status 走注入后端；未注入优雅 fail", async () => {
+  // 未注入（CLI / print 端）
+  const noBackend = await phonePanelTool.execute({ action: "open" }, ctx);
+  assert.equal(noBackend.isError, true);
+  assert.match(resultText(noBackend.content), /仅在桌面端可用/);
+  assert.match(resultText(noBackend.content), /mobile_/);
+
+  const log: string[] = [];
+  let state = { open: false, connected: false, device: null as string | null };
+  const fake: PhonePanelBackend = {
+    async open() {
+      log.push("open");
+      state = { open: true, connected: true, device: "127.0.0.1:16384" };
+    },
+    async close() {
+      log.push("close");
+      state = { open: false, connected: false, device: null };
+    },
+    async status() {
+      return state;
+    },
+  };
+  setPhonePanelBackend(fake);
+  try {
+    const opened = await phonePanelTool.execute({ action: "open" }, ctx);
+    assert.equal(opened.isError, false);
+    assert.match(resultText(opened.content), /已连接设备 127\.0\.0\.1:16384/);
+
+    const st = await phonePanelTool.execute({ action: "status" }, ctx);
+    assert.match(resultText(st.content), /面板打开中，已连接设备/);
+
+    const closed = await phonePanelTool.execute({ action: "close" }, ctx);
+    assert.equal(closed.isError, false);
+    assert.deepEqual(log, ["open", "close"]);
+  } finally {
+    setPhonePanelBackend(null);
+  }
+
+  // 未知 action
+  setPhonePanelBackend(fake);
+  try {
+    const bad = await phonePanelTool.execute({ action: "fly" }, ctx);
+    assert.equal(bad.isError, true);
+    assert.match(resultText(bad.content), /不认识 action/);
+  } finally {
+    setPhonePanelBackend(null);
+  }
+});
+
 // ---------------------------------------------------------------- uia: 解析
 
 test("uia: parseUiaJson 取杂散输出里的 JSON；坏输出返回 null", () => {
@@ -332,5 +469,139 @@ test("browser_file: upload 校验参数并透传；downloads 空与有记录", a
     assert.match(resultText(listed.content), /C:\/Downloads\/x\.csv/);
   } finally {
     setBrowserBackend(null);
+  }
+});
+
+// ---------------------------------------------------------------- paths: 数据目录迁移
+
+test("paths: migrateDataDir 旧 .c-agent 一次性改名，新目录已存在时 no-op", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "c-agent-migrate-"));
+  try {
+    // 旧目录存在 → 整目录改名，内部结构原样保留
+    const inner = path.join(dir, LEGACY_DATA_DIR, "sessions");
+    mkdirSync(inner, { recursive: true });
+    writeFileSync(path.join(inner, "s1.json"), "{}", "utf8");
+    migrateDataDir(dir);
+    assert.ok(existsSync(path.join(dir, DATA_DIR, "sessions", "s1.json")));
+    assert.ok(!existsSync(path.join(dir, LEGACY_DATA_DIR)));
+
+    // 新目录已存在 → no-op（旧目录即使还在也不动，避免覆盖新数据）
+    mkdirSync(path.join(dir, LEGACY_DATA_DIR), { recursive: true });
+    writeFileSync(path.join(dir, DATA_DIR, "marker"), "new", "utf8");
+    migrateDataDir(dir);
+    assert.equal(readFileSync(path.join(dir, DATA_DIR, "marker"), "utf8"), "new");
+    assert.ok(existsSync(path.join(dir, LEGACY_DATA_DIR)));
+
+    // 两者都不存在 → 静默 no-op 不抛
+    const empty = path.join(dir, "empty");
+    mkdirSync(empty);
+    migrateDataDir(empty);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------- procedure: 程序性记忆
+
+test("procedure: upsert 同 app+平台覆盖更新，其余条目原序保留", () => {
+  const first = upsertProcedure("", "微信", "desktop", "1. 点左下角三条杠\n2. 点设置", "改设置的路径", "微信 3.9.12；窗口 1200x800", "2026-09-11 16:50");
+  assert.match(first, /## 微信 @desktop/);
+  assert.match(first, /- 更新: 2026-09-11 16:50/);
+  assert.match(first, /- 摘要: 改设置的路径/);
+  // 模型补充的环境 + 系统自动盖章都要在条目里
+  assert.match(first, /- 环境: 微信 3\.9\.12；窗口 1200x800；系统: /);
+  assert.match(first, /(Windows|macOS|Linux) \S+ (x64|arm64|ia32)/);
+
+  // 同 key 再存：不追加新条目，整条替换（更新时间与步骤都换新）
+  const second = upsertProcedure(first, "微信", "desktop", "1. 新版步骤", "新版摘要", "", "2026-09-12 09:00");
+  assert.equal(parseProcedures(second).length, 1);
+  assert.match(second, /新版步骤/);
+  assert.doesNotMatch(second, /点左下角三条杠/);
+  // env 缺省也有系统盖章兜底
+  assert.match(second, /- 环境: (Windows|macOS|Linux) \S+ (x64|arm64|ia32)/);
+
+  // 不同 app / 不同平台：并存
+  const third = upsertProcedure(second, "微信", "mobile", "1. 我-设置", "", "", "2026-09-12 09:01");
+  const fourth = upsertProcedure(third, "抖音", "mobile", "1. 长按视频", "", "", "2026-09-12 09:02");
+  const all = parseProcedures(fourth);
+  assert.equal(all.length, 3);
+  assert.deepEqual(all.map((e) => `${e.app}@${e.platform}`), ["微信@desktop", "微信@mobile", "抖音@mobile"]);
+});
+
+test("procedure: parseProcedures 提取摘要/环境（摘要行优先，否则步骤首行去序号）与索引格式", () => {
+  const raw = [
+    "## 微信 @desktop",
+    "- 更新: 2026-09-11 16:50",
+    "- 环境: 微信 3.9.12；窗口 1200x800；系统: Windows 10.0.22631 x64",
+    "- 摘要: 改设置的路径",
+    "1. 点左下角三条杠",
+    "2. 点设置",
+    "",
+    "## 抖音 @mobile",
+    "- 更新: 2026-09-11 17:00",
+    "- 环境: MuMu 实例1 900x1600",
+    "1. 长按视频出现不感兴趣",
+  ].join("\n");
+  const entries = parseProcedures(raw);
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0]!.summary, "改设置的路径");
+  assert.equal(entries[0]!.updatedAt, "2026-09-11 16:50");
+  assert.equal(entries[0]!.env, "微信 3.9.12；窗口 1200x800；系统: Windows 10.0.22631 x64");
+  // 无摘要行 → 步骤首行去序号兜底
+  assert.equal(entries[1]!.summary, "长按视频出现不感兴趣");
+  assert.equal(entries[1]!.env, "MuMu 实例1 900x1600");
+
+  const index = formatProcedureIndex(raw);
+  assert.match(index, /操作记忆/);
+  assert.match(index, /核对条目的环境/);
+  assert.match(index, /- 微信 @desktop：改设置的路径〔微信 3\.9\.12；窗口 1200x800；系统: Windows 10\.0\.22631 x64〕/);
+  assert.match(index, /- 抖音 @mobile：长按视频出现不感兴趣〔MuMu 实例1 900x1600〕/);
+  assert.equal(formatProcedureIndex(""), "");
+});
+
+test("procedure 工具: save → search → forget 全链路（隔离存储文件）", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "c-agent-proc-"));
+  const file = path.join(dir, "procedures.md");
+  const prev = process.env["C_AGENT_PROCEDURES"];
+  process.env["C_AGENT_PROCEDURES"] = file;
+  try {
+    // 空库 list
+    const empty = await procedureTool.execute({ action: "list" }, ctx);
+    assert.match(resultText(empty.content), /还没有任何操作记忆/);
+
+    // save：非法 platform / 空 steps 都 fail
+    const badPlat = await procedureTool.execute({ action: "save", app: "微信", platform: "watch", steps: "x" }, ctx);
+    assert.equal(badPlat.isError, true);
+    const noSteps = await procedureTool.execute({ action: "save", app: "微信", platform: "desktop" }, ctx);
+    assert.equal(noSteps.isError, true);
+
+    const saved = await procedureTool.execute({ action: "save", app: "微信", platform: "desktop", title: "改设置", env: "微信 3.9.12；窗口 1200x800", steps: "1. 点三条杠\n2. 点设置" }, ctx);
+    assert.equal(saved.isError, false);
+    assert.match(resultText(saved.content), /已保存/);
+    assert.match(resultText(saved.content), /环境：微信 3\.9\.12；窗口 1200x800；系统: /);
+
+    // 再存同 key → 更新语义
+    const updated = await procedureTool.execute({ action: "save", app: "微信", platform: "desktop", steps: "1. 新路径" }, ctx);
+    assert.match(resultText(updated.content), /已更新/);
+
+    // search 命中 / 不命中（注意：第二次 save 已整条覆盖旧步骤，旧关键字「设置」不再存在）
+    const stale = await procedureTool.execute({ action: "search", query: "三条杠" }, ctx);
+    assert.match(resultText(stale.content), /还没操作过/);
+    const hit = await procedureTool.execute({ action: "search", query: "新路径" }, ctx);
+    assert.match(resultText(hit.content), /新路径/);
+    // search 结果带环境行（env 缺省时也有系统盖章兜底），模型据此核对环境是否一致
+    assert.match(resultText(hit.content), /- 环境: .*(Windows|macOS|Linux)/);
+    const miss = await procedureTool.execute({ action: "search", query: "photoshop图层蒙版" }, ctx);
+    assert.match(resultText(miss.content), /还没操作过/);
+
+    // forget 指定平台；未命中时如实报告
+    const forgotten = await procedureTool.execute({ action: "forget", app: "微信", platform: "desktop" }, ctx);
+    assert.match(resultText(forgotten.content), /已删除 1 条/);
+    const again = await procedureTool.execute({ action: "forget", app: "微信", platform: "desktop" }, ctx);
+    assert.match(resultText(again.content), /没有找到/);
+  } finally {
+    if (prev === undefined) delete process.env["C_AGENT_PROCEDURES"];
+    else process.env["C_AGENT_PROCEDURES"] = prev;
+    await fs.rm(dir, { recursive: true, force: true });
   }
 });

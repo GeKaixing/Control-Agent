@@ -137,7 +137,7 @@ test("cron store: 增删改查与坏文件回退", async () => {
 
   // 坏文件 / 版本不识别 → []（静默回退，不抛错）
   await writeCronJobs(dir, []);
-  await fs.writeFile(path.join(dir, ".c-agent", "cron", "jobs.json"), "{broken", "utf8");
+  await fs.writeFile(path.join(dir, ".control-agent", "cron", "jobs.json"), "{broken", "utf8");
   assert.deepEqual(await readCronJobs(dir), []);
 });
 

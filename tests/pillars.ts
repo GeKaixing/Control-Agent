@@ -435,7 +435,7 @@ test("Permission：bash 工具拦截灾难命令，不真正执行", async () =>
 
 // ------------------------------------------------------------ Context：项目记忆注入
 
-test("Context：collectProjectMemory 只注入 .c-agent 跨会话记忆，不注入 AGENTS.md", async () => {
+test("Context：collectProjectMemory 只注入 .control-agent 跨会话记忆，不注入 AGENTS.md", async () => {
   const dir = await tmpDir();
   await fs.writeFile(path.join(dir, "AGENTS.md"), "# 仓库规则\n先跑测试", "utf8");
   await fs.mkdir(path.join(dir, ".workbuddy", "memory"), { recursive: true });
@@ -460,7 +460,7 @@ test("Tool：memory append 写入带时间戳条目，read 读回", async () => 
   assert.equal(empty.isError, false);
   assert.ok(resultTextOf(empty.content).includes("还没有任何跨会话记忆"));
 
-  // append → 写入 .c-agent/memory.md，带时间戳
+  // append → 写入 .control-agent/memory.md，带时间戳
   const appended = await memoryTool.execute(
     { action: "append", content: "用户偏好 TypeScript 严格模式" },
     ctx,

@@ -49,7 +49,7 @@ export function SessionPicker(): React.ReactElement {
  * 两段结构：
  *  - 「打开的会话」：内存标签页，点任一条跳转过去（switchTo 成功后主进程广播
  *    ui_action("sessions-changed")，主窗口收到后重置视图、重拉 info/usage）
- *  - 「历史会话」：磁盘上的持久化会话（.c-agent/sessions/，含 CLI 与之前退出
+ *  - 「历史会话」：磁盘上的持久化会话（.control-agent/sessions/，含 CLI 与之前退出
  *    时落盘的），每条带删除按钮——两步确认防误删；使用中的条目由主进程标
  *    locked，禁删。
  */

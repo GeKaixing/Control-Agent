@@ -142,7 +142,7 @@ g/
 │   │   ├── state.ts              会话状态 + 会话树（节点 / ★ / 分支）、token 与 usage
 │   │   ├── transform.ts          transformContext：清理→压缩→裁剪
 │   │   ├── queue.ts              MessageQueue（中途指令合并）
-│   │   ├── sessions.ts           会话持久化（.c-agent/sessions/<id>.json，--resume 还原）
+│   │   ├── sessions.ts           会话持久化（.control-agent/sessions/<id>.json，--resume 还原）
 │   │   └── doc/                  子模块文档（README.md）
 │   ├── providers/              模型适配器（缺 key 自动降级 mock）
 │   │   ├── stream.ts             StreamAccumulator（流式 → 完整消息）
@@ -177,12 +177,12 @@ g/
 │   │   ├── print.ts              -p / 管道 / 缺 TTY 走这条
 │   │   └── doc/                  子模块文档（README.md）
 │   ├── log/                    文件日志
-│   │   ├── logger.ts             分级日志 → .c-agent/logs/（按天一份、绝不抛错）
+│   │   ├── logger.ts             分级日志 → .control-agent/logs/（按天一份、绝不抛错）
 │   │   ├── index.ts              统一出口（引用方只认这里）
 │   │   └── doc/                  子模块文档（README.md）
 │   ├── cron/                   定时任务
 │   │   ├── parser.ts             零依赖 5 字段 cron 解析 + nextCronRun（按天跳跃）
-│   │   ├── store.ts              .c-agent/cron/jobs.json（原子写、坏文件回退 []）
+│   │   ├── store.ts              .control-agent/cron/jobs.json（原子写、坏文件回退 []）
 │   │   ├── scheduler.ts          CronScheduler：30s 轮询、串行 onDue、isBusy 延迟、
 │   │   │                         停机错过的时点补跑一次
 │   │   ├── runner.ts             runJobOnce：临时会话无头执行，跑完即弃
