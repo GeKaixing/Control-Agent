@@ -60,8 +60,9 @@ interface StartDeps {
 
 /**
  * 应用图标（仓库根 docs/logo.png）。Windows 任务栏/窗口图标走 BrowserWindow 的
- * icon 项；macOS Dock 图标由系统/打包层负责，这里刻意不动（logo 是黑底方图，
- * 不适合直接当 Dock 图标）。文件缺失时返回 undefined，BrowserWindow 用默认图标。
+ * icon 项；macOS Dock 图标来自 bundle 的 electron.icns，dev 期由
+ * scripts/ensure-dock-icon.cjs 每次启动前注入（打包分发时走打包配置）。
+ * 文件缺失时返回 undefined，BrowserWindow 用默认图标。
  */
 function appIconPath(): string | undefined {
   try {

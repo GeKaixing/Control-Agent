@@ -19,10 +19,11 @@
     "desktop:build:renderer": "vite build --config desktop/vite.config.ts",
     "desktop:build": "npm run desktop:build:main && npm run desktop:build:renderer",
     "build:dictate-win": "node scripts/build-dictate-win.cjs",
-    "desktop:dev": "npm run desktop:ensure-mic-plist && npm run desktop:build:main && concurrently -k -n vite,electron \"vite --config desktop/vite.config.ts\" \"wait-on http-get://127.0.0.1:5173 && electron .\"",
+    "desktop:dev": "npm run desktop:ensure-mic-plist && npm run desktop:ensure-dock-icon && npm run desktop:build:main && concurrently -k -n vite,electron \"vite --config desktop/vite.config.ts\" \"wait-on http-get://127.0.0.1:5173 && electron .\"",
     "desktop:dev:safe": "env -u CODEBUDDY_BROKERED_FS_HOOK_ENABLED -u CODEBUDDY_SAFE_DELETE_SANDBOX -u CODEBUDDY_SANDBOX_BROKER_IPC_ADDRESS -u CODEBUDDY_SANDBOX_BROKER_SESSION_ID -u CODEBUDDY_SANDBOX_HOST_FILE_OPERATION_COMMAND -u ELECTRON_RUN_AS_NODE -u WORKBUDDY_NODE_ENV -u NODE_OPTIONS npm run desktop:dev",
     "desktop:main:write-cjs-pkg": "node -e \"require('fs').writeFileSync('desktop/main/dist/package.json', JSON.stringify({type: 'commonjs'}, null, 2) + '\\n')\"",
     "desktop:ensure-mic-plist": "node scripts/ensure-mic-plist.cjs",
+    "desktop:ensure-dock-icon": "node scripts/ensure-dock-icon.cjs",
     "bot:weixin": "tsx src/bot/weixin.ts"
   },
   "dependencies": {
