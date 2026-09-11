@@ -50,6 +50,7 @@ import {
 import type { WireEvent } from "../shared/api.js";
 import { setBrowserBackend } from "../../src/tools/browser.js";
 import { setPhonePanelBackend } from "../../src/tools/phone-panel.js";
+import { setWatchController } from "../../src/tools/index.js";
 import { migrateDataDir } from "../../src/paths.js";
 import { initFileLogging, log } from "../../src/log/index.js";
 
@@ -73,6 +74,8 @@ function appIconPath(): string | undefined {
 
 let mainWindow: BrowserWindow | null = null;
 let session: SessionManager | null = null;
+/** watch 工具的巡检定时器（单实例；start 重复调用被拒，先 stop 再换配置） */
+let watchTimer: ReturnType<typeof setInterval> | null = null;
 /**
  * 当前会话工作目录（resolveSessionCwd 的结果，bootstrap 时赋值；设置弹窗
  * 「工作目录」切换时更新）。模块级：registerIpcHandlers 的 handler 与
@@ -1049,6 +1052,27 @@ async function bootstrap(deps: StartDeps): Promise<void> {
     async status() {
       const s = PhoneMirror.state();
       return { open: s.open, connected: s.connected, device: s.device };
+    },
+  });
+
+  // agent 的持续监控通道：watch 工具的后端。tick 到点走 session.submit()——
+  // 空闲时起新轮、跑着时进 followUp 队列合并，与用户消息同一套通路。
+  setWatchController({
+    start(config, tickText) {
+      if (watchTimer !== null) return false;
+      watchTimer = setInterval(() => {
+        void session?.submit(tickText);
+      }, config.intervalSec * 1000);
+      return true;
+    },
+    stop() {
+      if (watchTimer !== null) {
+        clearInterval(watchTimer);
+        watchTimer = null;
+      }
+    },
+    isRunning() {
+      return watchTimer !== null;
     },
   });
 

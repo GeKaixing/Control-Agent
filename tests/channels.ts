@@ -28,7 +28,7 @@ import {
 import { formatUiaTree, parseUiaJson } from "../src/tools/uia.js";
 import { parseProcedures, upsertProcedure, formatProcedureIndex, procedureTool } from "../src/tools/procedure.js";
 import { migrateDataDir, DATA_DIR, LEGACY_DATA_DIR } from "../src/paths.js";
-import { phonePanelTool, setPhonePanelBackend, type PhonePanelBackend } from "../src/tools/index.js";
+import { phonePanelTool, setPhonePanelBackend, setWatchController, watchTool, type PhonePanelBackend, type WatchConfig, type WatchController } from "../src/tools/index.js";
 import {
   browserCookieTool,
   browserFileTool,
@@ -603,5 +603,62 @@ test("procedure 工具: save → search → forget 全链路（隔离存储文�
     if (prev === undefined) delete process.env["C_AGENT_PROCEDURES"];
     else process.env["C_AGENT_PROCEDURES"] = prev;
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------- watch: 持续监控
+
+test("watch 工具: start/stop/status 全链路（注入控制器）+ 未注入优雅 fail + 周期下限", async () => {
+  // 未注入控制器（CLI print / 无人值守环境）→ start 失败并指路 cron
+  const noCtl = await watchTool.execute({ action: "start", intervalSec: 30 }, ctx);
+  assert.equal(noCtl.isError, true);
+  assert.match(resultText(noCtl.content), /cron/);
+
+  // holder 包一层：闭包里赋值的 let 会被 TS 收窄成 never，没法直接断言
+  const cap: { v: { config: WatchConfig; tick: string } | null } = { v: null };
+  let running = false;
+  const ctl: WatchController = {
+    start(config, tickText) {
+      if (running) return false;
+      cap.v = { config, tick: tickText };
+      running = true;
+      return true;
+    },
+    stop() {
+      running = false;
+    },
+    isRunning() {
+      return running;
+    },
+  };
+  setWatchController(ctl);
+  try {
+    // 周期下限：低于 10s 拒绝（防失控循环）
+    const tooFast = await watchTool.execute({ action: "start", intervalSec: 5 }, ctx);
+    assert.equal(tooFast.isError, true);
+    assert.match(resultText(tooFast.content), /10/);
+
+    // 正常启动：配置与巡检消息原样到达控制器
+    const started = await watchTool.execute({ action: "start", intervalSec: 60, target: "张三" }, ctx);
+    assert.equal(started.isError, false);
+    assert.match(resultText(started.content), /每 60s/);
+    assert.ok(cap.v !== null);
+    assert.match(cap.v!.tick, /watch 巡检 · 每 60s/);
+    assert.match(cap.v!.tick, /张三/);
+
+    // 重复启动被拒（换配置先 stop）
+    const dup = await watchTool.execute({ action: "start", intervalSec: 30 }, ctx);
+    assert.equal(dup.isError, true);
+    assert.match(resultText(dup.content), /已在运行/);
+
+    // status / stop
+    const status = await watchTool.execute({ action: "status" }, ctx);
+    assert.match(resultText(status.content), /运行中/);
+    const stopped = await watchTool.execute({ action: "stop" }, ctx);
+    assert.match(resultText(stopped.content), /已停止/);
+    const afterStop = await watchTool.execute({ action: "status" }, ctx);
+    assert.match(resultText(afterStop.content), /未在运行/);
+  } finally {
+    setWatchController(null);
   }
 });

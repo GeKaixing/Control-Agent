@@ -20,6 +20,9 @@ import {
   writeCronJobs,
 } from "../src/cron/store.js";
 import { CronScheduler } from "../src/cron/scheduler.js";
+import { attachPersistentSession } from "../src/cron/runner.js";
+import { assembleSession } from "../src/session.js";
+import { saveSession, sessionFileExists } from "../src/context/index.js";
 import type { CronJob } from "../src/cron/store.js";
 
 import { test } from "./registry.js";
@@ -193,4 +196,23 @@ test("cron scheduler: 到点触发一次并记账，busy / 停用不触发", asy
   });
   await asyncScheduler.tick();
   assert.equal(asyncDone, true, "tick 应等待 async onDue 完成");
+});
+
+// ------------------------------------------------------------ runner: per-job 持久会话
+
+test("cron runner: attachPersistentSession 无文件预占 id、有文件续接", async () => {
+  const dir = await tempDir();
+  const first = await assembleSession({ cwd: dir });
+
+  // 无会话文件 → 预占 id（后续 saveSession 落到同名文件），此时文件尚不存在
+  await attachPersistentSession(first.state, dir, "cron_t1");
+  assert.equal(first.state.sessionId, "cron_t1");
+  assert.equal(await sessionFileExists(dir, "cron_t1"), false);
+
+  // 落盘一份会话 → 同 id 再接线走续接路径（不抛错、id 保持）
+  await saveSession(first.state, dir);
+  assert.equal(await sessionFileExists(dir, "cron_t1"), true);
+  const second = await assembleSession({ cwd: dir });
+  await attachPersistentSession(second.state, dir, "cron_t1");
+  assert.equal(second.state.sessionId, "cron_t1");
 });

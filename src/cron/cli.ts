@@ -81,7 +81,7 @@ async function runCronDaemon(cwd: string): Promise<number> {
       try {
         const at = new Date().toLocaleString("zh-CN", { hour12: false });
         console.log(`\n[${at}] 定时任务 ${job.id} 触发：${preview(job.prompt)}`);
-        const result = await runJobOnce({ cwd, prompt: job.prompt, label: job.id });
+        const result = await runJobOnce({ cwd, prompt: job.prompt, label: job.id, sessionId: `cron_${job.id}` });
         if (result.answer.trim().length > 0) {
           const markdown = process.stdout.isTTY === true;
           process.stdout.write(`${renderMarkdown(result.answer.trim(), { enabled: markdown })}\n`);
