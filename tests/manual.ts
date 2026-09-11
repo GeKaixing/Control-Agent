@@ -51,7 +51,7 @@ export interface SpawnOptions {
   /** 环境变量；默认继承 + 清空所有 _API_KEY（不让网络模型污染） */
   env?: NodeJS.ProcessEnv;
   /**
-   * 通过 stdin 喂入的初始内容；用于模拟「管道 echo 'x' | c-agent」。
+   * 通过 stdin 喂入的初始内容；用于模拟「管道 echo 'x' | Control-Agent」。
    * 喂完会自动关 stdin，无需手动 sendEof。
    */
   stdinPayload?: string;

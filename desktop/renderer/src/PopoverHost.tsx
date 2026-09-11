@@ -21,7 +21,12 @@ import type { InfoPayload, UsagePayload } from "../../shared/api";
  */
 export function PopoverHost({ id }: { id: string }): React.ReactElement {
   const [info, setInfo] = useState<InfoPayload | null>(null);
-  const [usage, setUsage] = useState<UsagePayload>({ input: 0, output: 0, total: 0 });
+  const [usage, setUsage] = useState<UsagePayload>({
+    input: 0,
+    output: 0,
+    total: 0,
+    contextTokens: 0,
+  });
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   const close = (): void => {
@@ -35,7 +40,12 @@ export function PopoverHost({ id }: { id: string }): React.ReactElement {
     void window.api.getUsage().then(setUsage);
     return window.api.onEvent((e) => {
       if (e.t === "turn_usage") {
-        setUsage({ input: e.input, output: e.output, total: e.total });
+        setUsage({
+          input: e.input,
+          output: e.output,
+          total: e.total,
+          contextTokens: e.contextTokens,
+        });
       } else if (e.t === "end") {
         void window.api.info().then(setInfo);
       } else if (e.t === "ui_action" && e.action === "refresh-info") {

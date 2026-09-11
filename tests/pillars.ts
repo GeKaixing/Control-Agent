@@ -513,8 +513,14 @@ test("Context：assembleSession 把跨会话记忆注入系统提示词", async 
   const { state } = await assembleSession({ cwd: dir });
   assert.ok(state.systemPrompt.includes("# 追加指令"));
   assert.ok(state.systemPrompt.includes("项目约定内容XYZ"));
-  // tmp 目录不是 git 仓库 → 不注入环境快照
-  assert.ok(!state.systemPrompt.includes("[环境快照]"));
+  // tmp 目录不是 git 仓库 → 不注入 git 环境快照。
+  // 注意：`[环境快照]` 前缀被 git 与 adb 两条线共用，而 adb 探测与是否 git 仓库无关
+  // （装了 adb 就会注入一行），所以断言必须落在 git 专属字段上，不能整个前缀一起否掉。
+  assert.ok(!state.systemPrompt.includes("git 分支"));
+  const envLines = state.systemPrompt
+    .split("\n")
+    .filter((line) => line.startsWith("[环境快照]"));
+  assert.ok(envLines.every((line) => line.includes("adb")));
 
   // 显式 systemPrompt 时完全替换，不注入
   const { state: s2 } = await assembleSession({ cwd: dir, systemPrompt: "自定义提示词" });
@@ -807,4 +813,47 @@ test("多模态：estimateTokens 对图片按固定估值，不随 base64 长度
   const tokens = estimateTokens(state.messages, "");
   // 1M base64 字符若按字符算约 28 万 token；固定估值下应远小于这个数
   assert.ok(tokens < 5_000, `tokens=${tokens}`);
+});
+
+test("Context：lastInputTokens 取最近一次 prompt_tokens，不是累计（窗口占比的分子）", async () => {
+  const state = createInitialState({
+    cwd: os.tmpdir(),
+    model: { provider: "mock", id: "m" },
+    tools: allTools,
+  });
+  const { lastInputTokens, totalUsage } = await import("../src/context/index.js");
+
+  // 还没跑过任何一轮：没有真值，调用方该降级到估算
+  assert.equal(lastInputTokens(state), null);
+
+  // 造 3 轮：每轮重发整段上下文，input 递增（10k / 12k / 15k）
+  for (const input of [10_000, 12_000, 15_000]) {
+    state.messages.push({
+      role: "assistant",
+      content: [{ type: "text", text: "ok" }],
+      model: "mock:m",
+      stopReason: "stop",
+      usage: { input, output: 100, cacheRead: 0, cacheWrite: 0, total: input + 100 },
+      timestamp: Date.now(),
+    });
+  }
+
+  assert.equal(lastInputTokens(state), 15_000);
+  // 累计口径是 37k —— 正是拿它当窗口占用会几十倍高估的原因
+  assert.equal(totalUsage(state).input, 37_000);
+  assert.notEqual(lastInputTokens(state), totalUsage(state).input);
+});
+
+test("Context：estimateTokens 支持传自校准后的 chars/token（与 transform 预算同口径）", async () => {
+  const { estimateTokens } = await import("../src/context/index.js");
+  const messages = [
+    {
+      role: "user" as const,
+      content: "x".repeat(3_500),
+      timestamp: Date.now(),
+    },
+  ];
+  // 默认 3.5 字符/token → 1000；显式传 7 → 500
+  assert.equal(estimateTokens(messages, ""), 1_000);
+  assert.equal(estimateTokens(messages, "", 7), 500);
 });

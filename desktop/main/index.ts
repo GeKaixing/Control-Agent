@@ -210,7 +210,7 @@ function createMsgWindow(deps: StartDeps): void {
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
-    title: "c-agent messages",
+    title: "Control-Agent messages",
     webPreferences: {
       preload: path.join(deps.__dirname, "..", "preload", "preload.cjs"),
       contextIsolation: true,
@@ -614,7 +614,7 @@ function registerIpcHandlers(deps: StartDeps): void {
       fullscreenable: false,
       skipTaskbar: true,
       show: false,
-      title: "c-agent popover",
+      title: "Control-Agent popover",
       parent: mainWindow,
       webPreferences: {
         preload: path.join(deps.__dirname, "..", "preload", "preload.cjs"),
@@ -741,7 +741,7 @@ async function createWindow(deps: StartDeps): Promise<void> {
     height: 240,
     minWidth: 720,
     minHeight: 120,
-    title: "c-agent desktop",
+    title: "Control-Agent desktop",
     // 标题栏底色跟渲染层浅色主题保持一致（白）。试过 transparent: true 让弹层区域
     // 透出桌面，用户实测后不要——保持白底；弹层空间由渲染层 spacer 撑高窗口解决。
     backgroundColor: "#ffffff",
@@ -812,7 +812,7 @@ function resolveDistConnectorsDir(distRoot: string): string | null {
  * 1. config.json 的 `cwd` 字段（用户显式指定的项目文件夹）优先——目录不存在
  *    就 mkdir（recursive 对已存在目录是 no-op），用户指定的意图就是让它可用；
  * 2. 缺省 = 桌面上的中性工作区文件夹 workspace（没有则创建）——刻意不叫
- *    c-agent，避免 agent 把工作区误认成 c-agent 项目本身；MEMORY.md、
+ *    Control-Agent，避免 agent 把工作区误认成 Control-Agent 项目本身；MEMORY.md、
  *    相对路径产物都落在这个独立目录，不污染 app home。
  * 缺省只是兜底，不写死：灵活性由 config.json 的 cwd 字段承接。
  * 创建失败不阻断启动——回落 app home 并 console 留痕（与 connectors start
@@ -859,7 +859,7 @@ async function bootstrap(deps: StartDeps): Promise<void> {
 
   // 移除默认 ApplicationMenu。Electron 在没显式设置菜单时，会给无菜单应用注入一个
   // 只含 placeholder 的菜单栏（File/Edit/View/Window/Help）——在 macOS 上是顶部全局
-  // 菜单，在 Windows 上会嵌进 frameless 窗口的拖动条旁边。c-agent 的 Composer 是
+  // 菜单，在 Windows 上会嵌进 frameless 窗口的拖动条旁边。Control-Agent 的 Composer 是
   // 720 宽无边框小窗，不需要这条占位栏；tray 状态菜单（tray-status.ts）走的是
   // Tray.setContextMenu，不受这条影响。
   Menu.setApplicationMenu(null);
@@ -911,9 +911,14 @@ async function bootstrap(deps: StartDeps): Promise<void> {
   const connectorsDir = resolveDistConnectorsDir(path.join(deps.__dirname, "dist"));
   let connectorTools: ReturnType<ConnectorRuntime["extraTools"]> = [];
   if (connectorsDir !== null) {
-    const { loaded, failed } = await new ConnectorLoader({ paths: [connectorsDir] }).scan();
+    const { loaded, failed, skipped } = await new ConnectorLoader({ paths: [connectorsDir] }).scan();
     for (const f of failed) {
       console.warn(`[connectors] load failed: ${f.rootDir} -> ${f.error}`);
+    }
+    // 默认关闭的插件（manifest.enabledBy 门）：browser-use 就属这类——桌面端已有内部
+    // 浏览器面板，不起第二个 Chromium。播报理由，方便排查「某个工具怎么不见了」。
+    for (const s of skipped) {
+      console.log(`[connectors] skipped: ${s.manifest.id}（${s.reason}）`);
     }
     for (const c of loaded) toolRuntime.adopt(c);
     const startFailed = await toolRuntime.start();

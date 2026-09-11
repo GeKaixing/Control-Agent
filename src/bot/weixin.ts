@@ -456,7 +456,7 @@ export class WeixinAdapter implements BotAdapter {
       try {
         const resp = await this.apiPost(
           EP_SEND_MESSAGE,
-          { msg: buildTextMessage(chatId, trimmed, tokenUsed, `c-agent-weixin-${randomUUID()}`) },
+          { msg: buildTextMessage(chatId, trimmed, tokenUsed, `control-agent-weixin-${randomUUID()}`) },
           API_TIMEOUT_MS,
         );
         const ret = resp.ret;

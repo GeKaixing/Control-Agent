@@ -132,7 +132,7 @@ export async function loadDotEnv(cwd: string): Promise<void> {
  * prefill 自身——为了让 LLM 真正开始接续，我们需要一条用户消息把它推下去。
  * 这个文本对用户可见，可通过 `--prefill-commit` 自定义或传 `""` 跳过。
  */
-export const DEFAULT_PREFILL_COMMIT = "[c-agent prefill] 请基于上一条助手消息继续。";
+export const DEFAULT_PREFILL_COMMIT = "[control-agent prefill] 请基于上一条助手消息继续。";
 
 /**
  * 把 CLI 参数翻译成 `createInitialState` 的 `seedMessages`。

@@ -174,7 +174,7 @@ export const responsesStream: StreamFn = async function* (options) {
         authorization: `Bearer ${model.apiKey ?? ""}`,
         // opencode zen go 中继的会话头要求对 responses 端点同样适用；其他端点忽略
         ...(sessionId !== undefined ? { "x-opencode-session": sessionId } : {}),
-        "user-agent": "c-agent/0.1",
+        "user-agent": "control-agent/0.1",
       },
       body: JSON.stringify(body),
       ...(signal ? { signal } : {}),

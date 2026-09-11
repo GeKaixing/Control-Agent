@@ -221,6 +221,25 @@ connector.json
 }
 ```
 
+## 4.2.1 默认关闭的 connector：`enabledBy`
+
+manifest 里写 `enabledBy`（值为环境变量名）表示**默认不加载**，只有该变量取真值时才加载：
+
+```json
+{
+  "id": "browser-use",
+  "enabledBy": "C_AGENT_BROWSER_USE"
+}
+```
+
+判定在 `ConnectorLoader.scan()` 一处收口（读 process.env，真值口径：非空且不是 `0/false/no/off`），
+命中的 connector 进 `LoaderResult.skipped`（不是 `failed`，也不是错误），各入口照实播报。
+
+为什么放 manifest 而不是各入口维护黑名单：开关是插件自己的属性。
+典型用例 `browser-use` —— 它起独立 Chromium 进程，与桌面端内置浏览器面板
+（`desktop/main/browser-view.ts`）职责重叠，两套同时在场会让模型选错工具、并多弹一个外部窗口；
+写进 manifest 后 CLI / 桌面端 / bot 都不需要知道这件事。
+
 ---
 
 # 4.3 Connector Interface

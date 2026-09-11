@@ -1,4 +1,4 @@
-# c-agent
+# Control-Agent
 
 用 TypeScript 从零实现的终端编码代理。核心是一个**外层循环 + 内层循环**的双层结构，配一套与厂商无关的统一大模型接口和可插拔工具。
 
@@ -101,7 +101,7 @@ npm start -- --model mock --user-prompt "u" --assistant-prompt "好的，" --pre
 npm start -- --model mock --user-prompt "u" --assistant-prompt "好的，" --prefill-commit ""
 ```
 
-`-ap` 注入 prefill 后会自动追加一条用户消息触发接续轮次。文本默认是 `[c-agent prefill] 请基于上一条助手消息继续。`，可用 `--prefill-commit` 自定义；传空串 `""` 表示**完全跳过追加**，模型会从 prefill 静默接续。prefill 必须跟在 user 之后，所以 `--assistant-prompt` 不允许单独使用。
+`-ap` 注入 prefill 后会自动追加一条用户消息触发接续轮次。文本默认是 `[control-agent prefill] 请基于上一条助手消息继续。`，可用 `--prefill-commit` 自定义；传空串 `""` 表示**完全跳过追加**，模型会从 prefill 静默接续。prefill 必须跟在 user 之后，所以 `--assistant-prompt` 不允许单独使用。
 
 ## 输出渲染
 
@@ -165,7 +165,7 @@ tests/
   run.ts              零依赖运行器入口；编排 + 直接 import 内部模块的单元/集成测试
   registry.ts         用例注册中心，子用例文件自注册
   manual.ts           ManualSession：spawn 真子进程 / in-process FakeInput
-  cli-print.ts        spawn c-agent 跑 print 模式的端到端用例（21）
+  cli-print.ts        spawn Control-Agent 跑 print 模式的端到端用例（21）
   repl-loop.ts        FakeInput 驱动 src/ui/repl.ts 的循环用例（17）
 ```
 
@@ -204,7 +204,7 @@ npm run typecheck  # tsc --noEmit
 | 文件 | 关注 | 用例数 |
 | --- | --- | --- |
 | `tests/run.ts` | 直接 import 内部模块测单元 / 集成 / 边界，最快 | 48 |
-| `tests/cli-print.ts` | spawn 真 c-agent 跑 print 模式，端到端测 CLI 参数、退出码、stdout/stderr 分离 | 21 |
+| `tests/cli-print.ts` | spawn 真 Control-Agent 跑 print 模式，端到端测 CLI 参数、退出码、stdout/stderr 分离 | 21 |
 | `tests/repl-loop.ts` | 把 `src/ui/repl.ts` 的循环用 `FakeInput` 驱动，in-process 模拟用户在终端里敲键盘 | 17 |
 
 CLI/REPL 两类用例都跑在 `tests/manual.ts` 提供的 `ManualSession` 上：

@@ -17,8 +17,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const KEYS = {
-  NSMicrophoneUsageDescription: "c-agent 需要使用麦克风进行语音输入（听写）。",
-  NSSpeechRecognitionUsageDescription: "c-agent 使用 macOS 系统语音识别把你的语音转换为文字（听写）。",
+  NSMicrophoneUsageDescription: "Control-Agent 需要使用麦克风进行语音输入（听写）。",
+  NSSpeechRecognitionUsageDescription: "Control-Agent 使用 macOS 系统语音识别把你的语音转换为文字（听写）。",
 };
 
 const plistPath = path.resolve(

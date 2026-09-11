@@ -6,7 +6,7 @@
 import type { Tool } from "../tools/types.js";
 import { truncateText } from "../tools/fs-utils.js";
 import type { AgentMessage, ToolResultMessage } from "../types.js";
-import { messageChars, activeBranch } from "./state.js";
+import { messageChars, activeBranch, DEFAULT_CHARS_PER_TOKEN } from "./state.js";
 import type { AgentState } from "./state.js";
 
 export interface TransformOptions {
@@ -234,9 +234,6 @@ function trimToBudget(
   return { messages: current, dropped };
 }
 
-/** 静态 chars/token 口径；有真实 usage 观测时被 state.observedCharsPerToken 覆盖 */
-const CHARS_PER_TOKEN = 3.5;
-
 /**
  * 自动 compact 的触发判定：估算当前活跃分支的字符量是否越过迟滞触发线。
  *
@@ -250,7 +247,7 @@ export function shouldAutoCompact(
   overrides?: Partial<TransformOptions>,
 ): boolean {
   const options = { ...defaultTransformOptions, ...overrides };
-  const charsPerToken = state.observedCharsPerToken ?? CHARS_PER_TOKEN;
+  const charsPerToken = state.observedCharsPerToken ?? DEFAULT_CHARS_PER_TOKEN;
   const charBudget =
     (options.maxContextTokens - options.reservedTokens) * charsPerToken;
   let total = state.systemPrompt.length;
@@ -270,7 +267,7 @@ export function transformContext(
   const linear = activeBranch(state);
   const cleaned = dropOrphanToolResults(linear);
   const pruned = pruneOldTurns(cleaned.messages, options);
-  const charsPerToken = state.observedCharsPerToken ?? CHARS_PER_TOKEN;
+  const charsPerToken = state.observedCharsPerToken ?? DEFAULT_CHARS_PER_TOKEN;
   const trimmed = trimToBudget(
     pruned.messages,
     state.systemPrompt,

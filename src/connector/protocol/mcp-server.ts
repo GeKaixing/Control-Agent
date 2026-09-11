@@ -24,7 +24,7 @@ import type { Readable, Writable } from "node:stream";
 import type { ConnectorRuntime } from "../runtime/connector-runtime.js";
 
 const SERVER_INFO = {
-  name: "c-agent-connector-runtime",
+  name: "control-agent-connector-runtime",
   version: "0.1.0",
 } as const;
 

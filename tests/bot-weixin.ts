@@ -33,7 +33,7 @@ import type { BotIncomingMessage } from "../src/bot/types.js";
 import { test } from "./registry.js";
 
 function tmpDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "c-agent-weixin-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "control-agent-weixin-test-"));
 }
 
 test("weixin: isSessionExpired 判定", () => {

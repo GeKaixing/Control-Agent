@@ -6,6 +6,8 @@
  * - 入口文件相对目录的路径默认 "index"（Loader 自动探测 .ts/.tsx/.js/.mjs 后缀）。
  * - manifest.id 与入口默认导出类的 instance.id 必须一致，否则加载失败。
  * - 入口默认导出必须是可 new 的类（无参构造），Loader 立即实例化。
+ * - manifest.enabledBy 给出环境变量名时，该变量未取真值 → 计入 skipped 直接不加载
+ *   （默认关闭的插件：判定在 Loader 一处收口，各入口不必各自维护黑名单）。
  *
  * Phase 1 范围：
  * - 仅扫描本地目录；不实现 npm install / 远程包（Phase 3 才做）。
@@ -44,31 +46,35 @@ export class ConnectorLoader {
   async scan(): Promise<LoaderResult> {
     const loaded: LoadedConnector[] = [];
     const failed: LoaderResult["failed"] = [];
+    const skipped: LoaderResult["skipped"] = [];
 
     for (const dir of this.options.paths) {
       if (!existsSync(dir)) continue;
       const entries = await safeReaddir(dir);
       for (const name of entries) {
         const rootDir = path.resolve(dir, name);
-        if (!existsSync(path.join(rootDir, MANIFEST_FILE))) continue;
+        const manifestPath = path.join(rootDir, MANIFEST_FILE);
+        if (!existsSync(manifestPath)) continue;
         try {
-          const result = await this.loadOne(rootDir);
-          if (result === null) continue;
-          if (this.options.only && !this.options.only.includes(result.manifest.id)) continue;
-          loaded.push(result);
+          const manifest = parseManifest(await readFile(manifestPath, "utf8"), manifestPath);
+          if (this.options.only && !this.options.only.includes(manifest.id)) continue;
+          // 显式启用门。判定放在实例化之前——入口模块可能有副作用（探测路径、
+          // console.warn），被挡下的 connector 不该付出这份代价。
+          const gate = manifest.enabledBy;
+          if (gate !== undefined && !envEnabled(gate)) {
+            skipped.push({ rootDir, manifest, reason: `默认关闭，需 ${gate}=1 启用` });
+            continue;
+          }
+          loaded.push(await this.loadOne(rootDir, manifest));
         } catch (err) {
           failed.push({ rootDir, error: errToMessage(err) });
         }
       }
     }
-    return { loaded, failed };
+    return { loaded, failed, skipped };
   }
 
-  private async loadOne(rootDir: string): Promise<LoadedConnector | null> {
-    const manifestPath = path.join(rootDir, MANIFEST_FILE);
-    const raw = await readFile(manifestPath, "utf8");
-    const manifest = parseManifest(raw, manifestPath);
-
+  private async loadOne(rootDir: string, manifest: ConnectorManifest): Promise<LoadedConnector> {
     const entryRel = manifest.entry ?? "index";
     const entryAbs = resolveEntry(rootDir, entryRel);
     if (entryAbs === null) {
@@ -150,6 +156,11 @@ function parseManifest(raw: string, manifestPath: string): ConnectorManifest {
 
   const description = typeof parsed["description"] === "string" ? parsed["description"] : undefined;
   const entry = typeof parsed["entry"] === "string" ? parsed["entry"] : undefined;
+  const enabledByRaw = parsed["enabledBy"];
+  if (enabledByRaw !== undefined && (typeof enabledByRaw !== "string" || enabledByRaw.length === 0)) {
+    throw new Error(`manifest.enabledBy must be a non-empty string (env var name): ${manifestPath}`);
+  }
+  const enabledBy = typeof enabledByRaw === "string" ? enabledByRaw : undefined;
 
   return {
     id: parsed["id"],
@@ -159,7 +170,18 @@ function parseManifest(raw: string, manifestPath: string): ConnectorManifest {
     permissions,
     capabilities,
     entry,
+    enabledBy,
   };
+}
+
+/**
+ * 环境变量真值判定（与 `C_AGENT_LOG` 的「非空即开」口径一致，额外认 0/false/no/off 为关）。
+ * 只读 process.env：门是进程级开关，读 Runtime 快照反而会让「启动后再设」失效。
+ */
+function envEnabled(name: string): boolean {
+  const raw = process.env[name];
+  if (raw === undefined) return false;
+  return !["", "0", "false", "no", "off"].includes(raw.trim().toLowerCase());
 }
 
 function parseCapability(raw: unknown, index: number, manifestPath: string): ToolCapability {

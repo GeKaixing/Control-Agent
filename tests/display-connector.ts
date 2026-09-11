@@ -156,7 +156,7 @@ test("display connector: SessionSignal 直接映射成 WireEvent", () => {
   connector.emit({ t: "paused" });
   connector.emit({ t: "resumed" });
   connector.emit({ t: "plan_pending", round: 2 });
-  connector.emit({ t: "turn_usage", input: 10, output: 5, total: 15 });
+  connector.emit({ t: "turn_usage", input: 10, output: 5, total: 15, contextTokens: 10 });
   connector.emit({ t: "end", toolRounds: 3 });
   connector.emit({ t: "error", message: "boom" });
 
@@ -165,7 +165,7 @@ test("display connector: SessionSignal 直接映射成 WireEvent", () => {
     { t: "paused" },
     { t: "resumed" },
     { t: "plan_pending", round: 2 },
-    { t: "turn_usage", input: 10, output: 5, total: 15 },
+    { t: "turn_usage", input: 10, output: 5, total: 15, contextTokens: 10 },
     { t: "end", toolRounds: 3 },
     { t: "error", message: "boom" },
   ]);

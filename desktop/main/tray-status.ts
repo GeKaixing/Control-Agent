@@ -132,12 +132,12 @@ export default class TrayStatusBridge implements Connector, DisplaySink {
     void _ctx;
     if (process.platform === "darwin") {
       this.tray = new Tray(nativeImage.createEmpty());
-      this.tray.setToolTip("c-agent");
+      this.tray.setToolTip("Control-Agent");
       this.tray.setContextMenu(
         Menu.buildFromTemplate([
           { label: "显示主窗口", click: () => this.onShowWindow?.() },
           { type: "separator" },
-          { label: "退出 c-agent", click: () => app.quit() },
+          { label: "退出 Control-Agent", click: () => app.quit() },
         ]),
       );
     }

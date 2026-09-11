@@ -25,7 +25,17 @@ export type WireEvent =
   | { t: "thinking"; delta: string }
   | { t: "tool_start"; id: string; name: string; args: Record<string, unknown> }
   | { t: "tool_end"; id: string; name: string; ok: boolean; text: string; ms: number }
-  | { t: "turn_usage"; input: number; output: number; total: number }
+  | {
+      t: "turn_usage";
+      /** 会话累计输入（计费口径，随轮次二次增长，**不是**上下文占用） */
+      input: number;
+      /** 会话累计输出 */
+      output: number;
+      /** 会话累计合计 */
+      total: number;
+      /** 当前上下文实际占用（最近一次请求的 prompt_tokens，无观测时降级为本地估算） */
+      contextTokens: number;
+    }
   | { t: "notice"; message: string }
   | { t: "end"; toolRounds: number }
   | { t: "error"; message: string }
@@ -370,9 +380,17 @@ export interface ChooseWorkspaceResult {
 }
 
 export interface UsagePayload {
+  /** 会话累计输入（计费口径：所有轮次 prompt_tokens 相加，**不是**当前上下文占用） */
   input: number;
+  /** 会话累计输出 */
   output: number;
+  /** 会话累计合计 */
   total: number;
+  /**
+   * 当前上下文实际占用：最近一次请求的 prompt_tokens（真值）；还没有完成的调用时
+   * 降级为「上下文构成」五段之和（本地估算）。上下文窗口占用率只用这个值。
+   */
+  contextTokens: number;
 }
 
 export interface SetModelResult {

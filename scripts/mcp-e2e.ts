@@ -80,8 +80,8 @@ async function partA(tmp: string): Promise<ConnectorRuntime> {
   check("memory 有知识图谱工具", names.includes("create_entities") && names.includes("read_graph"));
 
   // ---- everything: echo + get-sum
-  const echo = await exec(runtime, "echo", { message: "hello-from-c-agent" });
-  check("everything/echo 回显", !echo.isError && echo.text.includes("hello-from-c-agent"), echo.text.slice(0, 80));
+  const echo = await exec(runtime, "echo", { message: "hello-from-control-agent" });
+  check("everything/echo 回显", !echo.isError && echo.text.includes("hello-from-control-agent"), echo.text.slice(0, 80));
 
   const sum = await exec(runtime, "get-sum", { a: 20, b: 22 });
   check("everything/get-sum 20+22=42", !sum.isError && sum.text.includes("42"), sum.text.slice(0, 80));

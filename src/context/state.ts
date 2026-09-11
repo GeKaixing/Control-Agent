@@ -91,9 +91,22 @@ export function buildSystemPrompt(
   const workRules: string[] = [];
 
   if (!strong) {
-    // 恒定第一条：闲聊/纯问答不碰工具（mimo 这档模型必须显式说，学 Cline 句式）
+    // 恒定第一条：闲聊/纯问答不碰工具（mimo 这档模型必须显式说，学 Cline 句式）。
+    // 实时信息类请求必须显式豁免——否则「搜今日新闻」会被归进纯问答而拒绝调工具。
     workRules.push(
-      "先判断请求类型：打招呼、闲聊、纯知识问答等不需要接触项目的内容，直接用文字回答，一个工具都不要调用。",
+      "先判断请求类型：打招呼、闲聊、纯知识问答等不需要接触项目的内容，直接用文字回答，一个工具都不要调用（需要实时信息的请求除外，见下条）。",
+    );
+  }
+
+  // Environment 支柱（感知层）：模型不知道自己有浏览器面板这个事实，只写在
+  // tool description 里不够——闲聊豁免规则会先把「搜新闻」挡在工具表之外。
+  // 按「工具在场才写规则」的既有机制动态生成；工具不在场自然不承诺。
+  if (names.has("browser_navigate")) {
+    workRules.push(
+      "用户需要实时信息（新闻、天气、行情、价格、最新版本、搜索结果等）" +
+      "或要求查看/操作网页时，用 browser_navigate 打开内部浏览器面板" +
+      "（给搜索词会自动走搜索引擎），再用 browser_read / browser_evaluate / " +
+      "browser_screenshot 读取结果。不要以知识截止日期为由拒绝实时类请求。",
     );
   }
 
@@ -114,7 +127,10 @@ export function buildSystemPrompt(
 
   const numbered = workRules.map((rule, i) => `${i + 1}. ${rule}`);
   return [
-    "你是一个在终端里工作的编码代理。",
+    // identity：不自我设限为「编码代理」——那会让模型把非编码请求
+    // （搜新闻、查行情）当越界拒绝。能力事实写足，角色边界交给模型判断。
+    "你是一个运行在终端与桌面端的智能助手：擅长编码，也能操控内部浏览器面板、" +
+    "截屏与键鼠来自主完成搜索、查证等各类任务。需要动手就直接动手。",
     `运行时：${process.platform} / Node ${process.version}`,
     // Environment 支柱：日期与 shell 是模型最高频的两个猜测源（版本 pin、
     // 「最近」类判断、zsh/bash 语法差异）——事实给足，不写补救规则
@@ -241,11 +257,27 @@ export function messageChars(m: AgentMessage): number {
   return chars;
 }
 
-/** 粗略估算 token 数：中文按 1.5 字符/token，其余按 4 字符/token */
-export function estimateTokens(messages: AgentMessage[], systemPrompt: string): number {
+/**
+ * 静态 chars/token 口径（粗估除数）。transform 的预算走
+ * `state.observedCharsPerToken ?? 本值`；展示层估算也用同一个默认值，
+ * 保证「UI 显示的占用」与「harness 自己的裁剪预算」是同一把尺子。
+ */
+export const DEFAULT_CHARS_PER_TOKEN = 3.5;
+
+/**
+ * 粗略估算 token 数：按字符数 ÷ charsPerToken。
+ *
+ * charsPerToken 默认 DEFAULT_CHARS_PER_TOKEN；调用方若已拿到真实观测
+ * （state.observedCharsPerToken）应显式传入，让估算和 transform 预算同口径。
+ */
+export function estimateTokens(
+  messages: AgentMessage[],
+  systemPrompt: string,
+  charsPerToken: number = DEFAULT_CHARS_PER_TOKEN,
+): number {
   let chars = systemPrompt.length;
   for (const m of messages) chars += messageChars(m);
-  return Math.ceil(chars / 3.5);
+  return Math.ceil(chars / charsPerToken);
 }
 
 // ------------------------------------------------------------ token 口径自校准
@@ -277,6 +309,14 @@ export function calibrateCharsPerToken(
   state.observedCharsPerToken = prior * (1 - CALIBRATE_ALPHA) + observed * CALIBRATE_ALPHA;
 }
 
+/**
+ * 会话累计用量（计费口径）：把所有 assistant 消息的 usage 相加。
+ *
+ * ⚠️ 这是「一共花了多少 token」，**不是**「当前上下文占了多少」。
+ * agent 内层每一轮都要重发整段上下文，所以 input 随轮次近似二次增长——
+ * 拿它当上下文窗口占用率会严重高估（20 轮的小会话能算出几百 K）。
+ * 要看「上下文用了多少」用 lastInputTokens / estimateTokens。
+ */
 export function totalUsage(state: AgentState): {
   input: number;
   output: number;
@@ -290,6 +330,25 @@ export function totalUsage(state: AgentState): {
     output += m.usage.output;
   }
   return { input, output, total: input + output };
+}
+
+/**
+ * 最近一次真实请求的 prompt_tokens —— 「当前上下文占用了多少」的真值。
+ *
+ * 取活跃分支上**最后一条** usage.input > 0 的 assistant 消息：那正是模型最近
+ * 一次真正读到的 prompt 大小（系统提示词 + 工具 schema + 全部消息 + 缓存命中）。
+ * 与 totalUsage 的区别是本文件最容易被误读的一处，见 totalUsage 的注释。
+ *
+ * 还没跑完任何一轮（新会话 / 首轮仍在流式）时返回 null，调用方降级到估算值。
+ */
+export function lastInputTokens(state: AgentState): number | null {
+  const branch = activeBranch(state);
+  for (let i = branch.length - 1; i >= 0; i -= 1) {
+    const m = branch[i]!;
+    if (m.role !== "assistant") continue;
+    if (m.usage.input > 0) return m.usage.input;
+  }
+  return null;
 }
 
 // ------------------------------------------------------------ 树状操作

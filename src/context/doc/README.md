@@ -69,10 +69,15 @@ function activeBranch(state): AgentMessage[];         // ★ → Root 反转后�
 
 // 实用
 function buildSystemPrompt(cwd, toolNames): string;   // 默认系统提示词
-function estimateTokens(messages, systemPrompt): number;  // 粗估：中文 1.5 字/token，其余 4 字/token
+function estimateTokens(messages, systemPrompt, charsPerToken = 3.5): number;  // 粗估：总字符 ÷ charsPerToken
 function calibrateCharsPerToken(state, charsSent, inputTokens): void;  // usage 反馈 EMA 校准
-function totalUsage(state): { input; output; total };
+function totalUsage(state): { input; output; total };  // ⚠️ 会话累计（计费口径），不是上下文占用
+function lastInputTokens(state): number | null;        // ★ 当前上下文占用的真值：最近一次 prompt_tokens
 ```
+
+写「上下文窗口用了多少」时用 `lastInputTokens`（拿不到再降级到估算），
+**不要**用 `totalUsage().input`——每轮都重发整段上下文，累计量随轮次近似二次增长，
+拿它当分子会几十倍高估（桌面端弹层曾因此显示 259.6K / 26%，实际只有 ~11K）。
 
 ## transformContext —— 三步后处理
 
@@ -122,7 +127,11 @@ TransformedContext { messages, systemPrompt, tools, droppedMessages, prunedToolR
 `agent.ts` 每次真实调用后把「发出去的字符量 ÷ `usage.input`（prompt_tokens）」喂给
 `calibrateCharsPerToken(state, chars, tokens)` 做 EMA（α=0.3，观测值限幅 1.5~8 防异常
 provider 污染），结果存 `state.observedCharsPerToken`；`trimToBudget` 优先用它，
-无观测时回落 3.5。
+无观测时回落 `DEFAULT_CHARS_PER_TOKEN`（=3.5，state.ts 里的唯一常量定义）。
+
+**同一把尺子延伸到展示层**：桌面端「上下文构成」的分项估算（`session.ts:contextBreakdown`）
+也读 `state.observedCharsPerToken`，所以弹层里的数字与 harness 的裁剪决策不会互相打架
+（否则会出现「UI 说还有余量、harness 已经决定裁剪」的矛盾）。
 
 ## queue.ts —— 两条独立通道
 

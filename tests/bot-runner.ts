@@ -54,7 +54,7 @@ function makeMsg(chatId: string, text: string, overrides: Partial<BotIncomingMes
 }
 
 async function tmpCwd(): Promise<string> {
-  return fs.mkdtemp(path.join(os.tmpdir(), "c-agent-bot-test-"));
+  return fs.mkdtemp(path.join(os.tmpdir(), "control-agent-bot-test-"));
 }
 
 test("bot: 私聊消息经 mock 模型得到回复", async () => {

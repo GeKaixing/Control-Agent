@@ -14,6 +14,16 @@
   视觉通道兜底，只在「没有文本入口的场景」启用：桌面 GUI 应用、无 CLI 的软件、
   用户要求"帮我点这里/自动操作这个软件"。UI-TARS-2 技术报告同样把「纯 GUI 不够用、
   要接文件系统和终端」列为核心设计——两条通道是互补，不是二选一。
+- **浏览器控制只有一条主通道：内部浏览器面板**（`desktop/main/browser-view.ts` +
+  `src/tools/browser.ts`）。它是结构化通道——DOM 级读写、CDP 受信输入、多标签、
+  抓包/拦截、登录态持久，且不弹外部窗口。
+  外部浏览器兜底（`connectors-mcp/browser-use/`，起独立 Python + Chromium）**默认关闭**：
+  manifest 挂了 `enabledBy: C_AGENT_BROWSER_USE`，不显式点名就不加载。理由是两套
+  工具同时进模型工具表会让模型选错（拿 `browser_click` 去操作面板页面），并凭空多出
+  一个外部浏览器窗口。需要时 `C_AGENT_BROWSER_USE=1` 打开；它自己**默认无头**
+  （`BROWSER_USE_HEADLESS` 未设时补 `true`），要开窗看真实渲染就显式设 false。
+  默认关闭的插件都走 `manifest.enabledBy` 这条门（判定收口在 `ConnectorLoader.scan`），
+  不要再在某个入口里维护 connector 黑名单。
 - **感知端 `screenshot`**（只读）：截屏返回 JPEG 图片 + 尺寸。
   坐标语义：模型看到的截图左上角为 `(0,0)`，harness 不做任何坐标换算。
 - **执行端 `computer`**（mutating）：click / doubleClick / rightClick / type / hotkey /

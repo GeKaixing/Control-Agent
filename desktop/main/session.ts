@@ -19,7 +19,10 @@
 import { Agent, type AgentEvent } from "../../src/agent/agent.js";
 import {
   MessageQueue,
+  activeBranch,
+  DEFAULT_CHARS_PER_TOKEN,
   estimateTokens,
+  lastInputTokens,
   maxContextTokensFor,
   modelSpecString,
   totalUsage,
@@ -639,10 +642,14 @@ export class SessionManager {
 
   /**
    * 上下文构成分项估算：模型每次请求实际吃到的输入按来源拆五段。
-   * 口径与 estimateTokens 一致（字符数 / 3.5，中文再打折）——UI 参考值，非计费值。
    *
-   * - 系统提示词 / 对话消息直接来自 AgentState；
-   * - 工具 vs 连接器按「是否在 allTools 内置表」划分：内置 6 件的 schema 算工具，
+   * 估算口径 = 字符数 ÷ charsPerToken，其中 charsPerToken 优先用 state 上的真实观测
+   * （observedCharsPerToken，agent 每轮用 usage.input 做 EMA 校准），没有观测才退回
+   * DEFAULT_CHARS_PER_TOKEN —— 与 transformContext 的裁剪预算同一把尺子，
+   * 否则「UI 说还有余量」和「harness 已经决定裁剪」会互相打架。
+   *
+   * - 系统提示词 / 对话消息取 activeBranch（★ 分支），与模型真正看到的一致；
+   * - 工具 vs 连接器按「是否在 allTools 内置表」划分：内置件的 schema 算工具，
    *   Connector Runtime 注册的 extraTools（MCP / ffmpeg 等）算连接器；
    * - 技能 v1 尚未注入上下文，恒 0（字段占位，未来 skill 落地时填）。
    */
@@ -657,19 +664,42 @@ export class SessionManager {
       if (builtinNames.has(t.name)) toolChars += chars;
       else connectorChars += chars;
     }
-    const toTok = (chars: number): number => Math.ceil(chars / 3.5);
+    const perToken = this.state.observedCharsPerToken ?? DEFAULT_CHARS_PER_TOKEN;
+    const toTok = (chars: number): number => Math.ceil(chars / perToken);
+    const branch = activeBranch(this.state);
     return {
-      systemPrompt: estimateTokens([], this.state.systemPrompt),
+      systemPrompt: estimateTokens([], this.state.systemPrompt, perToken),
       tools: toTok(toolChars),
       connectors: toTok(connectorChars),
       skills: 0,
-      messages: estimateTokens(this.state.messages, ""),
+      messages: estimateTokens(branch, "", perToken),
     };
+  }
+
+  /**
+   * 当前上下文实际占用（token）—— 上下文窗口占用率的分子。
+   *
+   * 优先用 lastInputTokens（最近一次请求的 prompt_tokens，服务端真值：含系统提示词、
+   * 工具 schema、全部消息与缓存命中）；还没跑完任何一轮时降级为「上下文构成」五段
+   * 之和。**不要用 usage().input** —— 那是会话累计计费量，随轮次二次增长，
+   * 拿它算占比会几十倍高估（参见 src/context/state.ts 的 totalUsage 注释）。
+   */
+  contextTokens(): number {
+    const real = lastInputTokens(this.state);
+    if (real !== null) return real;
+    const b = this.contextBreakdown();
+    return b.systemPrompt + b.tools + b.connectors + b.skills + b.messages;
   }
 
   usage(): UsagePayload {
     const u = totalUsage(this.state);
-    return { input: u.input, output: u.output, total: u.total };
+    return {
+      // 累计计费口径（tray / 成本展示用），与 contextTokens 是两个概念
+      input: u.input,
+      output: u.output,
+      total: u.total,
+      contextTokens: this.contextTokens(),
+    };
   }
 
   /** 本会话最后一条用户消息原文（输入框 placeholder / 「复制提示词」按钮用）；没有则 null */
@@ -1532,7 +1562,14 @@ export class SessionManager {
       case "turn_end": {
         await this.pauseGate();
         const u = this.usage();
-        this.deps.emit({ t: "turn_usage", input: u.input, output: u.output, total: u.total });
+        this.deps.emit({
+          t: "turn_usage",
+          input: u.input,
+          output: u.output,
+          total: u.total,
+          // 上下文占用单独发：UI 的窗口占用率读这个，不读累计 input
+          contextTokens: u.contextTokens,
+        });
         return;
       }
       case "agent_end":

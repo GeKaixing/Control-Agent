@@ -1,5 +1,5 @@
 /**
- * 子进程级 CLI 测试 —— 跑真正的 c-agent 二进制，像一个人那样敲键盘、看输出。
+ * 子进程级 CLI 测试 —— 跑真正的 Control-Agent 二进制，像一个人那样敲键盘、看输出。
  *
  * 与 tests/run.ts 里那些用 `Agent` 类 + mock StreamFn 直接构造的端到端测试不同，
  * 这里通过 `node --import tsx src/index.ts ...` 启一个真子进程，验证：
@@ -120,7 +120,7 @@ test("手动：stdin 喂提示词等价于位置参数", async () => {
 });
 
 test("手动：print 模式 stdio 不是 TTY 时自动启用，连 -p 都不用写", async () => {
-  // 这个测试就是模拟「echo x | c-agent」的真实场景：
+  // 这个测试就是模拟「echo x | Control-Agent」的真实场景：
   //   ManualSession 用 pipe 喂 stdin，子进程 stdinIsTty=false → 强制 print 模式
   const s = await ManualSession.spawn({
     entry: ENTRY,
@@ -346,7 +346,7 @@ function makeTmp(prefix: string): string {
   // 用 mkdirSync 同步建，避免 race（异步 mkdir 后立刻 writeFile 可能还没建好）。
   const dir = path.join(
     "/tmp",
-    `c-agent-${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    `control-agent-${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
   fsSync.mkdirSync(dir, { recursive: true });
   return dir;

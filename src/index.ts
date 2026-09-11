@@ -219,9 +219,13 @@ async function bootstrapConnectors(
   if (paths.length === 0) return { loadedCount: 0, toolCount: 0 };
 
   const loader = new ConnectorLoader({ paths: [...paths] });
-  const { loaded, failed } = await loader.scan();
+  const { loaded, failed, skipped } = await loader.scan();
   for (const f of failed) {
     console.error(`[connector] load failed: ${f.rootDir} -> ${f.error}`);
+  }
+  // 默认关闭的插件（manifest.enabledBy 门）：如实播报，不静默少加载
+  for (const s of skipped) {
+    console.error(`[connector] skipped: ${s.manifest.id}（${s.reason}）`);
   }
   for (const c of loaded) runtime.adopt(c);
   if (loaded.length === 0) return { loadedCount: 0, toolCount: 0 };

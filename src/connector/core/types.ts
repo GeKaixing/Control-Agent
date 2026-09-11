@@ -46,6 +46,17 @@ export interface ConnectorManifest {
   capabilities: ToolCapability[];
   /** 入口文件相对 connector 目录的路径，默认 "index.ts" */
   entry?: string;
+  /**
+   * 显式启用开关：写一个环境变量名，该变量未取真值时不加载本 connector。
+   *
+   * 用途是「默认关闭、按需点名」的插件。典型例子 browser-use——它起独立
+   * Chromium 进程，与桌面端内置浏览器面板（browser-view.ts）职责重叠，两者
+   * 同时在场时模型会选错工具、并多弹一个外部浏览器窗口。把开关写进 manifest，
+   * 判定逻辑就只有 Loader 一处，各入口（CLI / 桌面端 / bot）不必各自维护黑名单。
+   *
+   * 真值判定与 `C_AGENT_LOG` 同口径：非空且不是 0/false/no/off。
+   */
+  enabledBy?: string;
 }
 
 /** 运行时传给 connector.execute 的上下文 */
@@ -121,8 +132,19 @@ export type SessionSignal =
   /** 用户提交的输入文本（submit / steer），显示端统一靠它渲染用户消息 */
   | { t: "user_text"; text: string }
   | { t: "plan_pending"; round: number }
-  /** 每轮 turn 结束的 token 用量（SessionManager 算好后交给显示层） */
-  | { t: "turn_usage"; input: number; output: number; total: number }
+  /**
+   * 每轮 turn 结束的 token 用量（SessionManager 算好后交给显示层）。
+   * - input / output / total：**会话累计**（计费口径，随轮次二次增长）
+   * - contextTokens：**当前上下文占用**（= 最近一次请求的 prompt_tokens，
+   *   无观测时降级为本地估算）——上下文窗口占用率必须用这个，不能用 input
+   */
+  | {
+      t: "turn_usage";
+      input: number;
+      output: number;
+      total: number;
+      contextTokens: number;
+    }
   | { t: "flush" }
   /**
    * Permission 支柱：审批模式下的 mutating 工具调用请求。主进程同时弹
@@ -166,6 +188,11 @@ export interface LoaderResult {
   loaded: LoadedConnector[];
   /** 扫描目录里发现但加载失败的 connector，附带原因 */
   failed: Array<{ rootDir: string; manifest?: ConnectorManifest; error: string }>;
+  /**
+   * 被 manifest.enabledBy 门挡下的 connector（**不是错误**，是它自己声明的默认关闭）。
+   * 单独成一类是为了让入口层能如实播报「跳过 N 个」，而不是静默少加载几个。
+   */
+  skipped: Array<{ rootDir: string; manifest: ConnectorManifest; reason: string }>;
 }
 
 /** Loader 配置项 */

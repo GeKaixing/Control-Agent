@@ -212,7 +212,7 @@ export const openaiStream: StreamFn = async function* (options) {
         // opencode zen go 中继要求：稳定会话 id（缺失 400 MissingSessionID）+
         // 自定义 UA（文档禁止 generic SDK/HTTP 库默认名）。其他端点忽略这两头。
         ...(options.sessionId !== undefined ? { "x-opencode-session": options.sessionId } : {}),
-        "user-agent": "c-agent/0.1",
+        "user-agent": "control-agent/0.1",
       },
       body: JSON.stringify(body),
       ...(signal ? { signal } : {}),

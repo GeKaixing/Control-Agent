@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from "react";
 import { ChevronDown, Zap, Activity, Sparkles, Gauge, FileText, Wrench, MessagesSquare, Plug, BookOpen } from "lucide-react";
 import { cn } from "../lib/utils";
+import { fmtTokens } from "../lib/format";
 import { openPopoverAt } from "./ToolsPanel";
 import { useSessionStore } from "../store";
 import type { ContextBreakdown, ReasoningLevel, UsagePayload } from "../../../shared/api";
@@ -66,6 +67,9 @@ export function ContextBar(): React.ReactElement {
 /**
  * 「上下文使用量」独立触发按钮：紧挨「均衡」旁，迷你进度条 + 百分比，
  * 阈值着色（<60% 绿 / 60-80% 琥珀 / ≥80% 红），点击打开用量 + 构成弹层。
+ *
+ * 分子必须用 usage.contextTokens（当前上下文占用），**不是** usage.input
+ * ——后者是会话累计计费量，随轮次二次增长，拿它算占比会几十倍高估。
  */
 export function ContextUsageBar({
   usage,
@@ -76,7 +80,7 @@ export function ContextUsageBar({
 }): React.ReactElement {
   const ref = useRef<HTMLButtonElement | null>(null);
   const safe = contextWindow > 0 ? contextWindow : 1;
-  const ratio = Math.min(1, usage.input / safe);
+  const ratio = Math.min(1, usage.contextTokens / safe);
   const pct = Math.round(ratio * 100);
   const barClass = pct >= 80 ? "bg-destructive" : pct >= 60 ? "bg-amber-500" : "bg-emerald-500";
   const textClass = pct >= 80 ? "text-destructive" : pct >= 60 ? "text-amber-500" : "text-emerald-500";
@@ -171,7 +175,8 @@ export function UsageContent({
   breakdown: ContextBreakdown;
 }): React.ReactElement {
   const safe = contextWindow > 0 ? contextWindow : 1;
-  const ratio = Math.min(1, usage.input / safe);
+  // 分子用 contextTokens（当前上下文占用），不是 usage.input（会话累计计费量）
+  const ratio = Math.min(1, usage.contextTokens / safe);
   const pct = Math.round(ratio * 100);
   const barClass = pct >= 80 ? "bg-destructive" : pct >= 60 ? "bg-amber-500" : "bg-emerald-500";
 
@@ -190,14 +195,35 @@ export function UsageContent({
         </div>
         <div className="flex items-baseline justify-between text-[11px]">
           <span className="text-muted-foreground">已用</span>
-          <span className="font-mono text-foreground">{fmt(usage.input)}</span>
+          <span className="font-mono text-foreground">{fmtTokens(usage.contextTokens)}</span>
         </div>
         <div className="flex items-baseline justify-between text-[11px]">
           <span className="text-muted-foreground">窗口上限</span>
-          <span className="font-mono text-foreground">{fmt(contextWindow)}</span>
+          <span className="font-mono text-foreground">{fmtTokens(contextWindow)}</span>
         </div>
         <p className="pt-1 text-[10px] leading-relaxed text-muted-foreground">
-          基于当前模型（按 model id 粗查）的上下文窗口估算。超过 80% 会变红提示溢出风险。
+          「已用」是当前上下文占用：取最近一次请求的 prompt_tokens 实测值，还没有
+          完成的请求时为本地估算。「窗口上限」取自提供商 /models 元数据，拿不到时按
+          model id 查内置表。超过 80% 变红提示溢出风险。
+        </p>
+      </div>
+
+      {/* ─── 本会话累计（计费口径，与上面的占用是两回事） ─── */}
+      <div className="border-t border-border bg-muted/40 px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+        本会话累计
+      </div>
+      <div className="space-y-1 px-3 py-2">
+        <div className="flex items-baseline justify-between text-[11px]">
+          <span className="text-muted-foreground">输入（含每轮重发的上下文）</span>
+          <span className="font-mono text-foreground">{fmtTokens(usage.input)}</span>
+        </div>
+        <div className="flex items-baseline justify-between text-[11px]">
+          <span className="text-muted-foreground">输出</span>
+          <span className="font-mono text-foreground">{fmtTokens(usage.output)}</span>
+        </div>
+        <p className="pt-0.5 text-[10px] leading-relaxed text-muted-foreground">
+          多轮任务里每轮都要重发整段上下文，所以累计输入远大于上面的「已用」——
+          两者口径不同，不可相比。
         </p>
       </div>
 
@@ -227,23 +253,25 @@ export function UsageContent({
                   tokens === 0 ? "text-muted-foreground/60" : "text-foreground",
                 )}
               >
-                {fmt(tokens)}
+                {fmtTokens(tokens)}
               </span>
             </div>
           );
         })}
+        {/* 合计：让用户能直接把它和上面的「已用」对上，差值来自估算口径 */}
+        <div className="flex items-center justify-between border-t border-border/60 pt-1.5 text-[11px]">
+          <span className="text-muted-foreground">合计</span>
+          <span className="font-mono text-foreground">
+            {fmtTokens(BREAKDOWN_SEGMENTS.reduce((acc, s) => acc + breakdown[s.key], 0))}
+          </span>
+        </div>
         <p className="pt-1 text-[10px] leading-relaxed text-muted-foreground">
-          按字符数粗估（与真实计费口径有偏差）：工具 / 连接器按 schema + 描述序列化估算，
-          技能注入暂未接入。
+          按字符数粗估（用与裁剪预算同一把尺子）：工具 / 连接器按 schema + 描述序列化估算，
+          技能注入暂未接入。合计与上面「已用」会有小幅出入——「已用」是实测 prompt_tokens，
+          含协议开销、图片折算等字符数算不到的部分。
         </p>
       </div>
     </div>
   );
 }
 
-/** k / M 简化。 */
-function fmt(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return String(n);
-}

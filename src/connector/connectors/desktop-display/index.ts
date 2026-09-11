@@ -172,6 +172,7 @@ export default class DesktopDisplayConnector implements Connector, DisplaySink {
           input: signal.input,
           output: signal.output,
           total: signal.total,
+          contextTokens: signal.contextTokens,
         });
         return;
       case "flush":

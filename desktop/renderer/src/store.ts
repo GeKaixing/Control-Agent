@@ -164,7 +164,7 @@ function markLastAssistantNotLive(turns: Turn[]): Turn[] {
 
 export const useSessionStore = create<State & Actions>((set, get) => ({
   info: null,
-  usage: { input: 0, output: 0, total: 0 },
+  usage: { input: 0, output: 0, total: 0, contextTokens: 0 },
   turns: [],
   status: "idle",
   errorMessage: null,
@@ -184,7 +184,7 @@ export const useSessionStore = create<State & Actions>((set, get) => ({
   reset: () =>
     set({
       turns: [],
-      usage: { input: 0, output: 0, total: 0 },
+      usage: { input: 0, output: 0, total: 0, contextTokens: 0 },
       status: "idle",
       errorMessage: null,
       notice: null,
@@ -331,7 +331,14 @@ export const useSessionStore = create<State & Actions>((set, get) => ({
             }),
           };
         case "turn_usage":
-          return { usage: { input: e.input, output: e.output, total: e.total } };
+          return {
+            usage: {
+              input: e.input,
+              output: e.output,
+              total: e.total,
+              contextTokens: e.contextTokens,
+            },
+          };
         case "notice":
           return { notice: e.message };
         case "plan_pending":

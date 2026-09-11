@@ -1,16 +1,24 @@
 /**
  * browser-use connector 冒烟测试（一次性脚本，不进 run.ts 测试链）。
  *
+ * browser-use 在 manifest 里挂了 enabledBy=C_AGENT_BROWSER_USE（默认关闭），本脚本
+ * 就是那条「显式点名」的路径，自己把开关打开。
+ *
  * 跑法：`tsx scripts/browser-use-smoke.ts [--headless=false]`
  * 流程：只加载 connectors-mcp/browser-use → start（MCP 握手 + tools/list）
  *   → browser_navigate(example.com) → browser_get_state → dispose。
  * 有头模式调试用：`BROWSER_USE_HEADLESS=false tsx scripts/browser-use-smoke.ts`
+ *   （缺省无头：browser-use connector 会把 BROWSER_USE_HEADLESS 补成 true）
  */
 
 import path from "node:path";
 
 import { ConnectorLoader } from "../src/connector/loader/connector-loader.js";
 import { ConnectorRuntime } from "../src/connector/runtime/connector-runtime.js";
+
+// 开启用门。Loader 在 scan() 时才读 process.env（connector 入口由它动态 import），
+// 所以放在 import 之后、main() 之前即可。
+process.env["C_AGENT_BROWSER_USE"] = "1";
 
 const CONNECTORS_DIR = path.resolve(import.meta.dirname, "../connectors-mcp");
 

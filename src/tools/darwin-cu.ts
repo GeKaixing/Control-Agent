@@ -77,7 +77,7 @@ async function getMainDisplayPoints(signal?: AbortSignal): Promise<{ w: number; 
 export async function captureMainDisplay(
   signal?: AbortSignal,
 ): Promise<{ dataUrl: string; w: number; h: number }> {
-  const tmp = join(tmpdir(), `c-agent-shot-${process.pid}-${Date.now()}.jpg`);
+  const tmp = join(tmpdir(), `control-agent-shot-${process.pid}-${Date.now()}.jpg`);
   try {
     await execFileAsync("screencapture", ["-x", "-o", "-t", "jpg", tmp], {
       timeout: 15_000,

@@ -3,7 +3,7 @@
  *
  * 用例分三块，本文件是核心单元 / 端到端测试：
  * 1. `tests/run.ts`（本文件）—— 工具、上下文、状态树、消息流转、print 收敛、markdown 渲染
- * 2. `tests/cli-print.ts` —— 子进程级 CLI 测试，spawn 真 c-agent 跑 print 模式
+ * 2. `tests/cli-print.ts` —— 子进程级 CLI 测试，spawn 真 Control-Agent 跑 print 模式
  * 3. `tests/repl-loop.ts` —— in-process REPL 测试，把 src/ui/repl.ts 的循环用 FakeInput 驱动
  *
  * 子用例文件通过 registry.register 注册用例，main() 顺序执行。本文件保留最厚的
@@ -89,6 +89,7 @@ import "./repl-loop.js";
 import "./pillars.js";
 import "./provider-mock.js";
 import "./display-connector.js";
+import "./connector-gate.js";
 import "./ws-bridge.js";
 import "./bot-runner.js";
 import "./bot-weixin.js";
@@ -1464,7 +1465,7 @@ test("prompts: createInitialState 不传 append 时与原行为一致", () => {
     tools: allTools,
   });
   // 没传 append 时 systemPrompt 就是 buildSystemPrompt 默认值
-  assert.ok(state.systemPrompt.includes("你是一个在终端里工作的编码代理。"));
+  assert.ok(state.systemPrompt.includes("运行在终端与桌面端的智能助手"));
   assert.ok(!state.systemPrompt.includes("# 追加指令"));
 });
 
@@ -1478,6 +1479,25 @@ test("prompts: 默认系统提示词要求闲聊/打招呼不调用工具", () =
   // 全量工具下，grep/glob 在场 → 用定位式规则，不再写通用兜底句
   assert.ok(state.systemPrompt.includes("查找优先用 grep / glob 定位"));
   assert.ok(!state.systemPrompt.includes("只有任务涉及读代码、查文件、改文件或跑命令时才动手"));
+});
+
+test("prompts: browser_navigate 在场时提示词承诺实时信息走浏览器面板", () => {
+  const makePrompt = (toolNames: string[]) =>
+    createInitialState({
+      cwd: process.cwd(),
+      model: { provider: "mock", id: "mock-1" },
+      tools: allTools.filter((t) => toolNames.includes(t.name)),
+    }).systemPrompt;
+
+  const withBrowser = makePrompt(["read", "bash", "browser_navigate", "browser_read"]);
+  assert.ok(withBrowser.includes("实时信息"));
+  assert.ok(withBrowser.includes("browser_navigate"));
+  // 闲聊豁免规则必须给实时请求开口子，否则「搜新闻」被挡在工具表外
+  assert.ok(withBrowser.includes("需要实时信息的请求除外"));
+
+  // 没有 browser 工具就不承诺（CLI 端点同样不该撒谎）
+  const noBrowser = makePrompt(["read", "bash"]);
+  assert.ok(!noBrowser.includes("打开内部浏览器面板"));
 });
 
 test("prompts: guidelines 按工具集动态生成（学 pi）", () => {
@@ -1703,7 +1723,7 @@ test("cli: buildSeedMessages --assistant-prompt 不传 prefillCommit 时用默�
   assert.equal(seeds[0]?.content, "用一句话回答");
   assert.equal(seeds[1]?.content, "好的，");
   assert.equal(seeds[2]?.content, DEFAULT_PREFILL_COMMIT);
-  assert.equal(seeds[2]?.content, "[c-agent prefill] 请基于上一条助手消息继续。");
+  assert.equal(seeds[2]?.content, "[control-agent prefill] 请基于上一条助手消息继续。");
 });
 
 test("cli: buildSeedMessages 自定义 prefillCommit 完整替换默认接续消息", () => {
@@ -3020,7 +3040,7 @@ test("openaiStream：透传 sessionId 为 x-opencode-session 头 + 自定义 UA"
 
     assert.equal(captured.length, 1);
     assert.equal(captured[0]!.headers["x-opencode-session"], "sess-fixed-123", "opencode zen go 中继要求会话头，缺失 400");
-    assert.equal(captured[0]!.headers["user-agent"], "c-agent/0.1", "文档禁止 generic SDK 默认 UA");
+    assert.equal(captured[0]!.headers["user-agent"], "control-agent/0.1", "文档禁止 generic SDK 默认 UA");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -4338,7 +4358,7 @@ async function main(): Promise<void> {
  * 这里在全部用例跑完后按前缀统一清扫：本轮新建的 + 历史漏网的都收掉。
  * 前缀刻意选了不易撞车的（pillars- 除外，但它在用户 temp 下只有本仓库会建）。
  */
-const TMP_SWEEP_PREFIXES = ["agent-test-", "pillars-", "c-agent-bot-test-", "c-agent-weixin-test-"];
+const TMP_SWEEP_PREFIXES = ["agent-test-", "pillars-", "control-agent-bot-test-", "control-agent-weixin-test-", "c-agent-bot-test-", "c-agent-weixin-test-"];
 
 async function sweepTestTmpDirs(): Promise<void> {
   const tmp = os.tmpdir();

@@ -2,6 +2,7 @@ import React from "react";
 import { Separator } from "./ui/separator";
 import type { InfoPayload, UsagePayload } from "../../../shared/api";
 import { isMacPlatform, useWcoButtonWidth } from "../lib/wco";
+import { fmtTokens } from "../lib/format";
 import { Cpu, FolderTree, AlertTriangle } from "lucide-react";
 
 interface Props {
@@ -40,7 +41,7 @@ function Brand(): React.ReactElement {
     <span className="flex shrink-0 select-none items-center gap-1.5">
       {/* 想换成图片 logo：把下面这个圆点换成 <img src=... className="h-4 w-4" /> */}
       <span className="h-3.5 w-3.5 rounded-full bg-foreground" />
-      <span className="font-semibold tracking-wide text-foreground">c-agent</span>
+      <span className="font-semibold tracking-wide text-foreground">Control-Agent</span>
     </span>
   );
 }
@@ -104,10 +105,15 @@ export function StatusBar({ info, usage, notice, title }: Props): React.ReactEle
         <span className="max-w-[24rem] truncate rounded-md bg-amber-900/40 px-2 py-0.5 text-amber-300">{notice}</span>
       )}
       <div className="ml-auto flex shrink-0 items-center gap-3">
-        <span className="font-mono">
-          in <span className="text-foreground">{usage.input}</span> ·
-          out <span className="text-foreground">{usage.output}</span> ·
-          total <span className="text-foreground">{usage.total}</span>
+        {/* ctx = 当前上下文占用（窗口占比的分子）；in/out/total = 会话累计计费量。
+            两者口径不同，刻意分开标注，避免被当成同一个数。 */}
+        <span className="font-mono" title="ctx：当前上下文占用（最近一次请求的 prompt_tokens）">
+          ctx <span className="text-foreground">{fmtTokens(usage.contextTokens)}</span>
+        </span>
+        <span className="font-mono" title="in/out/total：本会话累计用量（每轮重发上下文，累计远大于 ctx）">
+          in <span className="text-foreground">{fmtTokens(usage.input)}</span> ·
+          out <span className="text-foreground">{fmtTokens(usage.output)}</span> ·
+          total <span className="text-foreground">{fmtTokens(usage.total)}</span>
         </span>
       </div>
     </header>
