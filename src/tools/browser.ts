@@ -42,10 +42,13 @@ export interface BrowserScreenshot {
 
 /** 受信输入事件规格（CDP Input 域语义；坐标 = 页面视口 CSS 像素） */
 export interface BrowserInputSpec {
-  action: "click" | "dblclick" | "rightclick" | "move" | "type" | "key" | "scroll";
-  /** click / dblclick / rightclick / move / scroll 的锚点坐标 */
+  action: "click" | "dblclick" | "rightclick" | "move" | "drag" | "type" | "key" | "scroll";
+  /** click / dblclick / rightclick / move / drag / scroll 的锚点坐标 */
   x?: number;
   y?: number;
+  /** drag：终点坐标（按下 → 插值移动 → 松开） */
+  x2?: number;
+  y2?: number;
   /** type：要输入的文本（逐字符派发真实按键事件） */
   text?: string;
   /** key：按键名（Enter / Tab / Escape / Backspace / Delete / 方向键等） */
@@ -118,6 +121,42 @@ export interface InterceptRule {
   contentType?: string;
 }
 
+/** Cookie 条目（Network.getCookies 归一化结果） */
+export interface CookieEntry {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  /** Unix 秒；会话 cookie 为 -1 */
+  expires: number;
+  httpOnly: boolean;
+  secure: boolean;
+}
+
+/** 写入 Cookie 的规格（url 与 domain 至少给一个） */
+export interface CookieSpec {
+  name: string;
+  value: string;
+  url?: string;
+  domain?: string;
+  path?: string;
+  secure?: boolean;
+  httpOnly?: boolean;
+}
+
+/** 一次下载的记录（will-download 跟踪） */
+export interface DownloadEntry {
+  url: string;
+  filename: string;
+  /** 落盘绝对路径（开始下载前已定） */
+  savePath: string;
+  /** 已收字节数；完成前为当前进度 */
+  receivedBytes: number;
+  totalBytes: number;
+  /** progressing / completed / cancelled / interrupted */
+  state: "progressing" | "completed" | "cancelled" | "interrupted";
+}
+
 /**
  * 桌面端注入的浏览器控制器。所有方法在面板未打开时 throw Error
  * （工具层统一捕获转 fail，提示先 navigate）。
@@ -151,6 +190,18 @@ export interface BrowserBackend {
   wait(spec: BrowserWaitSpec): Promise<string>;
   /** 设置网络拦截规则（累积生效；传空数组清除全部） */
   networkIntercept(rules: InterceptRule[]): Promise<void>;
+  // ── Cookie 管理（CDP Network 域；httpOnly 等 JS 摸不到的也能读写） ──
+  /** 当前页面的 Cookie 列表 */
+  cookiesList(): Promise<CookieEntry[]>;
+  /** 写入/覆盖一条 Cookie（url 与 domain 至少一个） */
+  cookieSet(spec: CookieSpec): Promise<void>;
+  /** 删除 Cookie（按 name + domain/path 定位） */
+  cookieDelete(name: string, domain?: string, path?: string): Promise<void>;
+  // ── 文件通道 ──
+  /** 把本地文件塞进页面的 file input（CSS 选择器定位） */
+  upload(selector: string, filePaths: string[]): Promise<void>;
+  /** 下载记录列表（时间正序；done 的才有最终大小） */
+  downloadsList(): Promise<DownloadEntry[]>;
 }
 
 let backend: BrowserBackend | null = null;
@@ -347,11 +398,13 @@ export const browserInputTool: Tool = {
     properties: {
       action: {
         type: "string",
-        enum: ["click", "dblclick", "rightclick", "move", "type", "key", "scroll"],
-        description: "click 单击 / dblclick 双击 / rightclick 右键 / move 移动 / type 输入文本 / key 按键 / scroll 滚动",
+        enum: ["click", "dblclick", "rightclick", "move", "drag", "type", "key", "scroll"],
+        description: "click 单击 / dblclick 双击 / rightclick 右键 / move 移动（hover）/ drag 按住拖动 / type 输入文本 / key 按键 / scroll 滚动",
       },
-      x: { type: "number", description: "锚点 X（页面视口 CSS 像素，同截图坐标）；click/dblclick/rightclick/move 必填" },
+      x: { type: "number", description: "锚点 X（页面视口 CSS 像素，同截图坐标）；click/dblclick/rightclick/move/drag 必填" },
       y: { type: "number", description: "锚点 Y；同上必填。scroll 缺省用页面中心" },
+      x2: { type: "number", description: "drag：终点 X" },
+      y2: { type: "number", description: "drag：终点 Y" },
       text: { type: "string", description: "type：要输入的文本（逐字符真实按键）" },
       key: {
         type: "string",
@@ -379,6 +432,9 @@ export const browserInputTool: Tool = {
     if (["click", "dblclick", "rightclick", "move"].includes(action) && (x === undefined || y === undefined)) {
       return fail(inputArgsError(args, "x 和 y 坐标（可用 browser_screenshot 查看）"));
     }
+    if (action === "drag" && (x === undefined || y === undefined || typeof args["x2"] !== "number" || typeof args["y2"] !== "number")) {
+      return fail(inputArgsError(args, "x/y（起点）和 x2/y2（终点）"));
+    }
     if (action === "type" && String(args["text"] ?? "").length === 0) {
       return fail(inputArgsError(args, "text（要输入的文本）"));
     }
@@ -393,9 +449,11 @@ export const browserInputTool: Tool = {
       : undefined;
     try {
       await backend.dispatchInput({
-        action: action as "click" | "dblclick" | "rightclick" | "move" | "type" | "key" | "scroll",
+        action: action as "click" | "dblclick" | "rightclick" | "move" | "drag" | "type" | "key" | "scroll",
         x,
         y,
+        x2: typeof args["x2"] === "number" ? args["x2"] : undefined,
+        y2: typeof args["y2"] === "number" ? args["y2"] : undefined,
         text: args["text"] !== undefined ? String(args["text"]) : undefined,
         key: args["key"] !== undefined ? String(args["key"]) : undefined,
         dx: typeof args["dx"] === "number" ? args["dx"] : undefined,
@@ -645,6 +703,143 @@ export const browserInterceptTool: Tool = {
         ? `block ${urlPattern}`
         : `fulfill ${urlPattern} → ${rule.status ?? 200} (${rule.contentType ?? "application/json"})`;
       return ok(`拦截规则已生效：${desc}（累积生效，清除用 mode=clear）。`);
+    } catch (err) {
+      return fail(backendError(err));
+    }
+  },
+};
+
+// ── browser_cookie ──
+
+/** cookie 值展示上限（避免巨 cookie 撑爆输出；完整值可 set 时由模型自己给） */
+const MAX_COOKIE_VALUE = 120;
+
+export const browserCookieTool: Tool = {
+  name: "browser_cookie",
+  description:
+    "管理内部浏览器面板活动页面的 Cookie（CDP Network 域）：list 列出当前页全部" +
+    "Cookie（含 httpOnly——browser_evaluate 摸不到的那部分）；set 写入/覆盖一条" +
+    "（url 与 domain 至少给一个）；delete 按 name+domain 删除。典型用途：注入登录态、" +
+    "调试会话、迁移 Cookie。注意 set/delete 是真实改动，可能让当前登录态失效。",
+  isMutating: true,
+  parameters: {
+    type: "object",
+    properties: {
+      mode: {
+        type: "string",
+        enum: ["list", "set", "delete"],
+        description: "list 列出（缺省）/ set 写入或覆盖 / delete 删除",
+      },
+      name: { type: "string", description: "set / delete 必填：Cookie 名" },
+      value: { type: "string", description: "set 必填：Cookie 值" },
+      url: { type: "string", description: "set：作用 URL（与 domain 至少给一个；缺省用当前页 URL）" },
+      domain: { type: "string", description: "set / delete：作用域，如 .example.com" },
+      path: { type: "string", description: "set / delete：路径（缺省 /）" },
+      secure: { type: "boolean", description: "set：仅 HTTPS 发送（缺省 false）" },
+      httpOnly: { type: "boolean", description: "set：禁止 JS 读取（缺省 false）" },
+    },
+  },
+  async execute(args) {
+    if (backend === null) return fail(noBackend());
+    const mode = String(args["mode"] ?? "list");
+    const name = String(args["name"] ?? "").trim();
+    try {
+      if (mode === "list") {
+        const cookies = await backend.cookiesList();
+        if (cookies.length === 0) return ok("当前页面没有 Cookie。");
+        const lines = cookies.map((c) => {
+          const v = c.value.length > MAX_COOKIE_VALUE ? c.value.slice(0, MAX_COOKIE_VALUE) + "…" : c.value;
+          const flags = [
+            c.httpOnly ? "httpOnly" : null,
+            c.secure ? "secure" : null,
+            c.expires < 0 ? "会话" : null,
+          ].filter(Boolean).join(",");
+          return `${c.name}=${v}  domain=${c.domain} path=${c.path}${flags.length > 0 ? ` [${flags}]` : ""}`;
+        });
+        return ok(`共 ${cookies.length} 条 Cookie：\n${lines.join("\n")}`);
+      }
+      if (mode === "set") {
+        if (name.length === 0) return fail("mode=set 需要 name");
+        const value = String(args["value"] ?? "");
+        const url = args["url"] !== undefined ? String(args["url"]) : undefined;
+        const domain = args["domain"] !== undefined ? String(args["domain"]) : undefined;
+        if ((url === undefined || url.length === 0) && (domain === undefined || domain.length === 0)) {
+          return fail("mode=set 需要 url 或 domain 至少一个（写当前页可省 url，用 domain 或从 browser_read 的 URL 推）");
+        }
+        await backend.cookieSet({
+          name,
+          value,
+          url,
+          domain,
+          path: args["path"] !== undefined ? String(args["path"]) : undefined,
+          secure: args["secure"] === true,
+          httpOnly: args["httpOnly"] === true,
+        });
+        return ok(`Cookie 已写入：${name}（${domain ?? url}）。刷新页面后生效。`);
+      }
+      // delete
+      if (name.length === 0) return fail("mode=delete 需要 name");
+      await backend.cookieDelete(
+        name,
+        args["domain"] !== undefined ? String(args["domain"]) : undefined,
+        args["path"] !== undefined ? String(args["path"]) : undefined,
+      );
+      return ok(`Cookie 已删除：${name}。`);
+    } catch (err) {
+      return fail(backendError(err));
+    }
+  },
+};
+
+// ── browser_file ──
+
+export const browserFileTool: Tool = {
+  name: "browser_file",
+  description:
+    "内部浏览器面板的文件通道：upload 把本地文件塞进页面的 file input（给 CSS " +
+    "选择器定位，如 input[type=file]，绕过系统文件选择对话框）；downloads 列出" +
+    "下载记录（文件自动落盘到系统下载目录，给保存路径与进度）。配合场景：上传头像/" +
+    "附件、下载报表/导出文件后交给 read/bash 处理。",
+  isMutating: true,
+  parameters: {
+    type: "object",
+    properties: {
+      action: {
+        type: "string",
+        enum: ["upload", "downloads"],
+        description: "upload 上传文件 / downloads 列出下载记录",
+      },
+      selector: { type: "string", description: "upload 必填：file input 的 CSS 选择器" },
+      paths: {
+        type: "array",
+        items: { type: "string" },
+        description: "upload 必填：本地文件绝对路径数组（多选 input 可给多个）",
+      },
+    },
+  },
+  async execute(args) {
+    if (backend === null) return fail(noBackend());
+    const action = String(args["action"] ?? "");
+    try {
+      if (action === "downloads") {
+        const list = await backend.downloadsList();
+        if (list.length === 0) {
+          return ok("还没有下载记录。页面触发下载后（如点导出按钮）再查。");
+        }
+        const lines = list.map((d) =>
+          `[${d.state}] ${d.filename}（${d.receivedBytes}/${d.totalBytes || "?"} 字节）\n    ${d.savePath}`,
+        );
+        return ok(`共 ${list.length} 条下载记录（时间正序）：\n${lines.join("\n")}`);
+      }
+      if (action === "upload") {
+        const selector = String(args["selector"] ?? "").trim();
+        const paths = Array.isArray(args["paths"]) ? args["paths"].map((p) => String(p)) : [];
+        if (selector.length === 0) return fail('action=upload 需要 selector（file input 的 CSS 选择器，如 "input[type=file]"）');
+        if (paths.length === 0) return fail("action=upload 需要 paths（本地文件绝对路径数组）");
+        await backend.upload(selector, paths);
+        return ok(`已把 ${paths.length} 个文件填入 ${selector}（页面表单还需要提交才会真正上传）。`);
+      }
+      return fail("browser_file 不认识 action=" + action + "（支持 upload / downloads）");
     } catch (err) {
       return fail(backendError(err));
     }

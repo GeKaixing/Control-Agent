@@ -3,14 +3,16 @@
 import type { LlmTool } from "../providers/types.js";
 import { askUserTool } from "./ask-user.js";
 import { bashTool, resolveShell, type ShellSpec } from "./bash.js";
-import { browserEvaluateTool, browserInputTool, browserInterceptTool, browserNavigateTool, browserNetworkTool, browserReadTool, browserScreenshotTool, browserTabsTool, browserWaitTool } from "./browser.js";
+import { browserCookieTool, browserEvaluateTool, browserFileTool, browserInputTool, browserInterceptTool, browserNavigateTool, browserNetworkTool, browserReadTool, browserScreenshotTool, browserTabsTool, browserWaitTool } from "./browser.js";
 import { computerTool } from "./computer.js";
 import { editTool } from "./edit.js";
 import { globTool } from "./glob.js";
 import { grepTool } from "./grep.js";
 import { memoryTool } from "./memory.js";
+import { mobileActTool, mobileScreenTool, mobileUiTool } from "./mobile.js";
 import { readTool } from "./read.js";
 import { screenshotTool } from "./screenshot.js";
+import { uiaTreeTool } from "./uia.js";
 import type { Tool } from "./types.js";
 import { describeSchema } from "./validate.js";
 import { writeTool } from "./write.js";
@@ -34,6 +36,10 @@ const _registry = {
   memory: memoryTool,
   screenshot: screenshotTool,
   computer: computerTool,
+  uia_tree: uiaTreeTool,
+  mobile_screen: mobileScreenTool,
+  mobile_ui: mobileUiTool,
+  mobile_act: mobileActTool,
   browser_navigate: browserNavigateTool,
   browser_read: browserReadTool,
   browser_screenshot: browserScreenshotTool,
@@ -43,6 +49,8 @@ const _registry = {
   browser_tabs: browserTabsTool,
   browser_wait: browserWaitTool,
   browser_intercept: browserInterceptTool,
+  browser_cookie: browserCookieTool,
+  browser_file: browserFileTool,
   ask_user: askUserTool,
 } as const;
 
@@ -76,8 +84,8 @@ export function describeToolsForModel(tools: Tool[] = allTools): LlmTool[] {
 }
 
 export type { Tool, ToolContext, ToolResult } from "./types.js";
-export { askUserTool, bashTool, browserEvaluateTool, browserInputTool, browserInterceptTool, browserNavigateTool, browserNetworkTool, browserReadTool, browserScreenshotTool, browserTabsTool, browserWaitTool, computerTool, editTool, globTool, grepTool, memoryTool, readTool, screenshotTool, writeTool, resolveShell };
+export { askUserTool, bashTool, browserCookieTool, browserEvaluateTool, browserFileTool, browserInputTool, browserInterceptTool, browserNavigateTool, browserNetworkTool, browserReadTool, browserScreenshotTool, browserTabsTool, browserWaitTool, computerTool, editTool, globTool, grepTool, memoryTool, mobileActTool, mobileScreenTool, mobileUiTool, readTool, screenshotTool, uiaTreeTool, writeTool, resolveShell };
 export { setAskUserHandler, type AskUserFn, type AskUserRequest } from "./ask-user.js";
-export { setBrowserBackend, type BrowserBackend, type BrowserInputSpec, type BrowserPageSnapshot, type BrowserScreenshot, type BrowserTabEntry, type BrowserWaitSpec, type InterceptRule, type NetworkBody, type NetworkEntry } from "./browser.js";
+export { setBrowserBackend, type BrowserBackend, type BrowserInputSpec, type BrowserPageSnapshot, type BrowserScreenshot, type BrowserTabEntry, type BrowserWaitSpec, type CookieEntry, type CookieSpec, type DownloadEntry, type InterceptRule, type NetworkBody, type NetworkEntry } from "./browser.js";
 export { memoryPath, MEMORY_FILE } from "./memory.js";
 export type { ShellSpec };

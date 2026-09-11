@@ -95,6 +95,7 @@ import "./bot-runner.js";
 import "./bot-weixin.js";
 import "./log.js";
 import "./cron.js";
+import "./channels.js";
 
 const noSignal = (): AbortSignal => new AbortController().signal;
 
@@ -369,6 +370,15 @@ function makeFakeBackend(overrides: Partial<BrowserBackend> = {}): BrowserBacken
       return "页面加载完成";
     },
     async networkIntercept() {},
+    async cookiesList() {
+      return [];
+    },
+    async cookieSet() {},
+    async cookieDelete() {},
+    async upload() {},
+    async downloadsList() {
+      return [];
+    },
     ...overrides,
   };
 }

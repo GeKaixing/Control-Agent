@@ -569,7 +569,9 @@ test("Environment：parseAdbDevices 解析 adb 输出；注入行区分有/无�
   const line = formatAdbSnapshotLine({ devices });
   assert.match(line, /emulator-5554\(device\)/);
   assert.match(line, /1A2B3C4D\(unauthorized\)/);
-  assert.match(line, /adb shell am start/);
+  assert.match(line, /mobile_screen/);
+  assert.match(line, /mobile_ui/);
+  assert.match(line, /mobile_act/);
   assert.match(line, /USB 调试授权弹窗/);
 
   // 无设备：仍告知 adb 通道存在，并指路 USB 调试

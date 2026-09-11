@@ -298,7 +298,7 @@ export function formatAdbSnapshotLine(snap: AdbSnapshot): string {
       snap.devices.map((d) => `${d.serial}(${d.state})`).join("、"),
   ];
   if (usable.length > 0) {
-    parts.push("已授权设备可用 bash 直接跑 adb 命令操作手机（如 adb shell am start 启动 App、adb shell input 点按）");
+    parts.push("已授权设备优先用 mobile_screen（截屏）/ mobile_ui（uiautomator 控件树）/ mobile_act（tap/swipe/text/key/start）工具操作手机——文本通道优先，任意 adb 命令也可直接走 bash");
   }
   if (blocked.length > 0) {
     parts.push("未授权设备需在手机上确认 USB 调试授权弹窗");

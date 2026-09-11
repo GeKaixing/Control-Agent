@@ -27,8 +27,9 @@
  * （首开）才置 0 等渲染层上报。
  */
 
-import { shell, WebContentsView, type BrowserWindow, type Debugger, type WebContents } from "electron";
-import type { BrowserBackend, BrowserInputSpec, BrowserTabEntry, BrowserWaitSpec, InterceptRule, NetworkBody, NetworkEntry } from "../../src/tools/browser.js";
+import { existsSync } from "node:fs";
+import { app, shell, WebContentsView, type BrowserWindow, type Debugger, type WebContents } from "electron";
+import type { BrowserBackend, BrowserInputSpec, BrowserTabEntry, BrowserWaitSpec, CookieEntry, CookieSpec, DownloadEntry, InterceptRule, NetworkBody, NetworkEntry } from "../../src/tools/browser.js";
 
 /** 单个标签页的折算快照（回推渲染层画标签条 / 工具条用） */
 export interface BrowserTabSnapshot {
@@ -110,6 +111,46 @@ const NET_MAX_RECORDS = 500;
 /** 浏览器专属持久化 session 分区（persist: 前缀 = 落盘，登录态跨重启保留）。 */
 const BROWSER_PARTITION = "persist:browser-panel";
 
+/** 下载记录上限（全局，时间正序，挤掉最老的） */
+const DOWNLOAD_MAX_RECORDS = 50;
+const downloadRecords: DownloadEntry[] = [];
+
+/**
+ * will-download 钩子：静默落盘到系统下载目录（不弹保存对话框——面板是
+ * agent 通道，交互窗口反而是干扰），重名自动加序号；进度与终态回写记录。
+ */
+function trackDownload(item: Electron.DownloadItem): void {
+  const dir = app.getPath("downloads");
+  const base = item.getFilename();
+  let candidate = `${dir}/${base}`;
+  for (let i = 1; i < 1000; i++) {
+    if (!existsSync(candidate)) break;
+    const dot = base.lastIndexOf(".");
+    const stem = dot > 0 ? base.slice(0, dot) : base;
+    const ext = dot > 0 ? base.slice(dot) : "";
+    candidate = `${dir}/${stem} (${i})${ext}`;
+  }
+  item.setSavePath(candidate);
+  const entry: DownloadEntry = {
+    url: item.getURL(),
+    filename: base,
+    savePath: candidate,
+    receivedBytes: 0,
+    totalBytes: item.getTotalBytes(),
+    state: "progressing",
+  };
+  downloadRecords.push(entry);
+  if (downloadRecords.length > DOWNLOAD_MAX_RECORDS) downloadRecords.shift();
+  item.on("updated", (_e, state) => {
+    entry.receivedBytes = item.getReceivedBytes();
+    entry.state = state === "interrupted" ? "interrupted" : "progressing";
+  });
+  item.once("done", (_e, state) => {
+    entry.receivedBytes = item.getReceivedBytes();
+    entry.state = state === "completed" ? "completed" : state === "cancelled" ? "cancelled" : "interrupted";
+  });
+}
+
 class Tab {
   readonly id = nextTabId();
   readonly view: WebContentsView;
@@ -147,6 +188,8 @@ class Tab {
     wc.on("did-navigate", emit);
     wc.on("did-navigate-in-page", emit);
     wc.on("page-title-updated", emit);
+    // 下载静默落盘到系统下载目录（记录进 downloadRecords 供 browser_file 查询）
+    wc.session.on("will-download", (_event, item) => trackDownload(item));
     wc.setWindowOpenHandler(({ url: target }) => {
       if (/^https?:/i.test(target)) {
         void wc.loadURL(target).catch(() => {});
@@ -699,6 +742,25 @@ const agentBackend: BrowserBackend = {
       });
       return;
     }
+    if (spec.action === "drag") {
+      // 按下 → 10 步插值移动（瞬时大位移会被不少页面当非人手）→ 松开
+      const x = spec.x as number;
+      const y = spec.y as number;
+      const x2 = spec.x2 as number;
+      const y2 = spec.y2 as number;
+      await dbg.sendCommand("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: 1, modifiers: mods });
+      const steps = 10;
+      for (let i = 1; i <= steps; i++) {
+        await dbg.sendCommand("Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: Math.round(x + ((x2 - x) * i) / steps),
+          y: Math.round(y + ((y2 - y) * i) / steps),
+          button: "left", buttons: 1, modifiers: mods,
+        });
+      }
+      await dbg.sendCommand("Input.dispatchMouseEvent", { type: "mouseReleased", x: x2, y: y2, button: "left", buttons: 0, clickCount: 1, modifiers: mods });
+      return;
+    }
     if (spec.action === "click" || spec.action === "dblclick" || spec.action === "rightclick") {
       const button = spec.action === "rightclick" ? "right" : "left";
       const buttons = spec.action === "rightclick" ? 2 : 1;
@@ -875,6 +937,73 @@ const agentBackend: BrowserBackend = {
     await dbg.sendCommand("Fetch.enable", {
       patterns: t.interceptRules.map((r) => ({ urlPattern: r.urlPattern })),
     });
+  },
+
+  // ── Cookie（CDP Network 域；getCookies/setCookie/deleteCookies 不需要 enable） ──
+
+  async cookiesList(): Promise<CookieEntry[]> {
+    const dbg = requireDebugger(requireActiveTab());
+    const res = (await dbg.sendCommand("Network.getCookies")) as {
+      cookies?: Array<{ name: string; value: string; domain: string; path: string; expires: number; httpOnly: boolean; secure: boolean }>;
+    };
+    return (res.cookies ?? []).map((c) => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      path: c.path,
+      expires: c.expires,
+      httpOnly: c.httpOnly,
+      secure: c.secure,
+    }));
+  },
+
+  async cookieSet(spec: CookieSpec): Promise<void> {
+    const dbg = requireDebugger(requireActiveTab());
+    const res = (await dbg.sendCommand("Network.setCookie", {
+      name: spec.name,
+      value: spec.value,
+      ...(spec.url !== undefined ? { url: spec.url } : {}),
+      ...(spec.domain !== undefined ? { domain: spec.domain } : {}),
+      path: spec.path ?? "/",
+      secure: spec.secure ?? false,
+      httpOnly: spec.httpOnly ?? false,
+    })) as { success?: boolean };
+    if (res.success !== true) {
+      throw new Error(`Cookie 写入被拒绝（${spec.name}）——检查 url/domain 与 secure 约束`);
+    }
+  },
+
+  async cookieDelete(name: string, domain?: string, path?: string): Promise<void> {
+    const dbg = requireDebugger(requireActiveTab());
+    await dbg.sendCommand("Network.deleteCookies", {
+      name,
+      ...(domain !== undefined ? { domain } : {}),
+      ...(path !== undefined ? { path } : {}),
+    });
+  },
+
+  // ── 文件通道 ──
+
+  async upload(selector: string, filePaths: string[]): Promise<void> {
+    const dbg = requireDebugger(requireActiveTab());
+    await dbg.sendCommand("DOM.enable");
+    try {
+      const doc = (await dbg.sendCommand("DOM.getDocument")) as { root?: { nodeId?: number } };
+      const q = (await dbg.sendCommand("DOM.querySelector", {
+        nodeId: doc.root?.nodeId,
+        selector,
+      })) as { nodeId?: number };
+      if (q.nodeId === undefined || q.nodeId === 0) {
+        throw new Error(`页面上没找到元素：${selector}（检查选择器，跨域 iframe 里的元素无法定位）`);
+      }
+      await dbg.sendCommand("DOM.setFileInputFiles", { files: filePaths, nodeId: q.nodeId });
+    } finally {
+      await dbg.sendCommand("DOM.disable").catch(() => {});
+    }
+  },
+
+  async downloadsList(): Promise<DownloadEntry[]> {
+    return downloadRecords.map((d) => ({ ...d }));
   },
 };
 

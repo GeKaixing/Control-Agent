@@ -1,4 +1,4 @@
-# tools/ —— 19 个内置工具
+# tools/ —— 25 个内置工具
 
 **关注点**：把模型能调用的「动作」都收口在这里。模型看到的是 `LlmTool[]`（带 JSON Schema
 签名），执行时拿到的是 `Tool.execute(args, ctx)` 的统一签名。每个工具都标 `isMutating`
@@ -71,11 +71,17 @@ function fail(text: string): ToolResult;
 | `browser_read` | 读面板当前页面文本 | false | 无参数；URL + 标题 + body.innerText（2 万字符截断） |
 | `browser_screenshot` | 截面板画面 | false | `fullPage?`（true 走 CDP captureBeyondViewport 截整页）；JPEG + 尺寸，坐标语义同 screenshot |
 | `browser_evaluate` | 页面主 frame 执行任意 JS | true | `expression`（可 await；对象结果 JSON 序列化） |
-| `browser_input` | 派发受信输入事件（isTrusted=true） | true | `action`（click/dblclick/rightclick/move/type/key/scroll）+ `x/y`、`text/key`、`dx/dy`、`delayMs?`、`modifiers?`；坐标与截图同坐标系 |
+| `browser_input` | 派发受信输入事件（isTrusted=true） | true | `action`（click/dblclick/rightclick/move/drag/type/key/scroll）+ `x/y`、`x2/y2?`（drag）、`text/key`、`dx/dy`、`delayMs?`、`modifiers?`；坐标与截图同坐标系 |
 | `browser_network` | 观察页面网络流量（CDP Network 域） | false | `mode`（start/stop/list/body）+ `requestId?`、`urlFilter?`、`limit?`；list 出 URL/方法/状态/大小，body 读响应体 |
 | `browser_tabs` | 多标签管理（list/new/switch/close） | true | `action`（list 缺省）+ `id?`（switch/close 必填）、`url?`（new）；browser_* 其余工具作用于活动标签 |
 | `browser_wait` | 等待条件满足（替代盲轮询） | false | `load?`、`selector?`、`networkIdleMs?`、`timeoutMs?`（可组合，缺省等加载完成） |
 | `browser_intercept` | 拦截/改写页面网络请求（CDP Fetch 域） | true | `urlPattern`（* 通配）+ `action`（block/fulfill）+ `status?/body?/contentType?`、`mode?`（set 缺省/clear）；规则累积生效 |
+| `browser_cookie` | Cookie 管理（CDP Network 域） | true | `mode`（list 缺省/set/delete）+ `name?/value?/url?/domain?/path?/secure?/httpOnly?`；set 需要 url 或 domain 至少一个；httpOnly cookie 只有这条通道能读写 |
+| `browser_file` | 文件通道（上传/下载记录） | true | `action`（upload/downloads）+ `selector?`（file input 的 CSS 选择器）+ `paths?`（本地绝对路径）；下载静默落盘到系统下载目录（重名自动加序号），不弹保存对话框 |
+| `mobile_screen` | 手机截屏（adb screencap） | false | `serial?`（多设备必填）；PNG dataUrl + `wm size`，坐标语义同 screenshot |
+| `mobile_ui` | 手机控件树（uiautomator dump） | false | `serial?`；输出 text/desc/id/bounds 中心坐标的控件清单——手机 GUI 的文本层主力 |
+| `mobile_act` | 手机操作（input/am start） | true | `action`（tap/swipe/text/key/start）+ `x/y`、`x2/y2?`、`durationMs?`、`content?`、`key?`、`target?`、`serial?`；坐标用 mobile_ui 的 bounds 中心最稳 |
+| `uia_tree` | 桌面控件树（UIA 文本层） | false | `title?`（窗口/应用名子串；不给 = 只列顶层窗口索引）、`maxNodes?`；输出中心坐标可直接给 computer |
 
 ### ask_user 通道注入约定
 
@@ -120,6 +126,24 @@ function fail(text: string): ToolResult;
   keydown 监听），key 支持具名键 + 单字符；响应体依赖浏览器缓存，导航离开后可能取不到；
   后端抛
   「面板未打开」时工具层转成「先调 browser_navigate」的可执行提示。
+
+### Mobile Use 与 uia_tree —— 三通道分层（2026-09-11）
+
+- **分层原则的落地形态**：每条通道都有「文本层 + 视觉层」，文本层优先——
+  - 浏览器：browser_read/evaluate（文本）+ browser_screenshot（视觉兜底）；
+  - 电脑：`uia_tree`（UIA 控件树，文本）+ screenshot/computer（视觉兜底）；
+  - 手机：`mobile_ui`（uiautomator 控件树，文本）+ `mobile_screen`（视觉兜底）。
+- **坐标口径**：mobile_ui/mobile_screen 的坐标都是手机屏幕像素（同一坐标系），
+  bounds 中心点最稳；uia_tree 输出的是桌面屏幕物理像素（Windows）/ 逻辑点
+  （macOS），可直接给 computer。各通道坐标不通用，别跨通道喂。
+- **多设备**：mobile_* 的 `serial` 参数缺省时用唯一设备；adb 报
+  "more than one device" 时 fail 信息里带 `adb devices` 的设备列表。
+- **转义**：`mobile_act` 的 text 走设备端单引号包裹（`'` → `'\''`），空格转
+  `%s`（input text 的官方约定）；任意 adb 命令仍可直接走 bash。
+- **下载**：browser-view.ts 的 will-download 静默落盘到系统下载目录（重名加
+  序号），不弹保存对话框；记录上限 50 条，browser_file action=downloads 查询。
+- **screencap 必须走 buffer**：`execFile` 缺省 utf8 解码会毁 PNG——mobile.ts
+  专门有 `runAdbBuffer`（`encoding: "buffer"`），别合并回文本路径。
 
 ### Computer Use 坐标与安全约定
 
