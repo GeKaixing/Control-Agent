@@ -55,6 +55,20 @@ interface StartDeps {
   __dirname: string;
 }
 
+/**
+ * 应用图标（仓库根 docs/logo.png）。Windows 任务栏/窗口图标走 BrowserWindow 的
+ * icon 项；macOS Dock 图标由系统/打包层负责，这里刻意不动（logo 是黑底方图，
+ * 不适合直接当 Dock 图标）。文件缺失时返回 undefined，BrowserWindow 用默认图标。
+ */
+function appIconPath(): string | undefined {
+  try {
+    const p = path.join(app.getAppPath(), "docs", "logo.png");
+    return existsSync(p) ? p : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 let mainWindow: BrowserWindow | null = null;
 let session: SessionManager | null = null;
 /**
@@ -742,6 +756,7 @@ async function createWindow(deps: StartDeps): Promise<void> {
     minWidth: 720,
     minHeight: 120,
     title: "Control-Agent desktop",
+    icon: appIconPath(),
     // 标题栏底色跟渲染层浅色主题保持一致（白）。试过 transparent: true 让弹层区域
     // 透出桌面，用户实测后不要——保持白底；弹层空间由渲染层 spacer 撑高窗口解决。
     backgroundColor: "#ffffff",

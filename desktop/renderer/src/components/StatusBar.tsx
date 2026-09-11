@@ -39,8 +39,7 @@ interface Props {
 function Brand(): React.ReactElement {
   return (
     <span className="flex shrink-0 select-none items-center gap-1.5">
-      {/* 想换成图片 logo：把下面这个圆点换成 <img src=... className="h-4 w-4" /> */}
-      <span className="h-3.5 w-3.5 rounded-full bg-foreground" />
+      <img src="/logo.png" alt="Control-Agent" className="h-4 w-4 rounded" draggable={false} />
       <span className="font-semibold tracking-wide text-foreground">Control-Agent</span>
     </span>
   );
