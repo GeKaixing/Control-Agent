@@ -20,6 +20,7 @@ import { CronScheduler, readCronJobs } from "./cron/index.js";
 import type { StreamFn } from "./providers/types.js";
 import { migrateDataDir } from "./paths.js";
 import { initFileLogging, log } from "./log/index.js";
+import { setWatchController } from "./tools/index.js";
 import { assembleSession, buildSeedMessages, resolveModelSpec } from "./session.js";
 import type { ModelRef } from "./types.js";
 import { InputController } from "./ui/input.js";
@@ -427,6 +428,38 @@ async function main(): Promise<number> {
       },
     });
     cronScheduler.start();
+
+    // watch 巡检控制器：watch 工具 start 后按周期把巡检消息注入当前会话。
+    // 与 cron 注入同款路径：agent 空闲 → enqueueUser + 起新轮；
+    // 正在跑 → 只入队，外层循环在下一轮边界自动合并（不丢不抢）。
+    let watchTimer: ReturnType<typeof setInterval> | null = null;
+    setWatchController({
+      start(config, tickText) {
+        if (watchTimer !== null) return false;
+        watchTimer = setInterval(() => {
+          agent.enqueueUser(tickText);
+          if (!agent.isRunning) {
+            void agent
+              .run()
+              .catch((err: unknown) => {
+                log.error("watch", "巡检轮执行失败", err instanceof Error ? err : undefined);
+              });
+          }
+        }, config.intervalSec * 1000);
+        // 不吊住进程：REPL 退出（Ctrl-D）时定时器不拦着退场
+        watchTimer.unref();
+        return true;
+      },
+      stop() {
+        if (watchTimer !== null) {
+          clearInterval(watchTimer);
+          watchTimer = null;
+        }
+      },
+      isRunning() {
+        return watchTimer !== null;
+      },
+    });
 
     console.log(`  输入 /help 查看命令，Ctrl-C 中断当前任务，Ctrl-D 退出。\n`);
 

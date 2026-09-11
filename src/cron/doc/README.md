@@ -7,7 +7,7 @@
 - `parser.ts` — `parseCron`（5 字段表达式 → 布尔查找表）/ `nextCronRun`（严格「之后」的下一次触发时刻，按天跳跃避免逐分钟扫描）。dom/dow 都被显式约束时取**或**（POSIX cron 语义）。
 - `store.ts` — `.control-agent/cron/jobs.json` 持久化。原子写（tmp + rename）、版本字段、坏文件静默回退 `[]`，与 `context/sessions.ts` 同一套纪律。`nextRunAt` 落盘保证同一分钟内重启不重复触发。
 - `scheduler.ts` — `CronScheduler` 轮询触发（默认 30s 一查，interval `unref`）。**补跑语义**：停机期间错过的时点下个 tick 补跑一次然后跳到未来，不逐个补齐。串行 `await onDue` + `ticking` 标志 + `isBusy` 回调三层防并发。
-- `runner.ts` — `runJobOnce`：无头执行一条任务（`assembleSession` 临时会话，跑完即弃，不持久化会话树），事件收敛复用 `ui/print.ts`。
+- `runner.ts` — `runJobOnce`：无头执行一条任务（`assembleSession` 装配，事件收敛复用 `ui/print.ts`）。传 `sessionId`（守护模式固定传 `cron_<jobId>`）即走 per-job 持久会话：已有会话文件就整体还原续跑，没有则预占 id 落盘——同一条任务跨 tick 是一段连续对话（与微信 bot 续聊同一套机制）。
 - `cli.ts` — `npm start -- cron list|add|rm|on|off|run` 子命令；`cron run` 是前台守护（Ctrl-C 退出）。
 - `index.ts` — 统一出口；`cli.ts` 不进出口（避免 REPL 引出口时连带 stdout 渲染）。
 

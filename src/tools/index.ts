@@ -17,6 +17,7 @@ import { screenshotTool } from "./screenshot.js";
 import { uiaTreeTool } from "./uia.js";
 import type { Tool } from "./types.js";
 import { describeSchema } from "./validate.js";
+import { watchTool } from "./watch.js";
 import { writeTool } from "./write.js";
 
 /**
@@ -55,6 +56,7 @@ const _registry = {
   browser_intercept: browserInterceptTool,
   browser_cookie: browserCookieTool,
   browser_file: browserFileTool,
+  watch: watchTool,
   ask_user: askUserTool,
 } as const;
 
@@ -88,10 +90,11 @@ export function describeToolsForModel(tools: Tool[] = allTools): LlmTool[] {
 }
 
 export type { Tool, ToolContext, ToolResult } from "./types.js";
-export { askUserTool, bashTool, browserCookieTool, browserEvaluateTool, browserFileTool, browserInputTool, browserInterceptTool, browserNavigateTool, browserNetworkTool, browserReadTool, browserScreenshotTool, browserTabsTool, browserWaitTool, computerTool, editTool, globTool, grepTool, memoryTool, mobileActTool, mobileScreenTool, mobileUiTool, phonePanelTool, procedureTool, readTool, screenshotTool, uiaTreeTool, writeTool, resolveShell };
+export { askUserTool, bashTool, browserCookieTool, browserEvaluateTool, browserFileTool, browserInputTool, browserInterceptTool, browserNavigateTool, browserNetworkTool, browserReadTool, browserScreenshotTool, browserTabsTool, browserWaitTool, computerTool, editTool, globTool, grepTool, memoryTool, mobileActTool, mobileScreenTool, mobileUiTool, phonePanelTool, procedureTool, readTool, screenshotTool, uiaTreeTool, watchTool, writeTool, resolveShell };
 export { setAskUserHandler, type AskUserFn, type AskUserRequest } from "./ask-user.js";
 export { setBrowserBackend, type BrowserBackend, type BrowserInputSpec, type BrowserPageSnapshot, type BrowserScreenshot, type BrowserTabEntry, type BrowserWaitSpec, type CookieEntry, type CookieSpec, type DownloadEntry, type InterceptRule, type NetworkBody, type NetworkEntry } from "./browser.js";
 export { setPhonePanelBackend, type PhonePanelBackend } from "./phone-panel.js";
+export { setWatchController, type WatchConfig, type WatchController } from "./watch.js";
 export { memoryPath, MEMORY_FILE } from "./memory.js";
 export { procedureFile, PROCEDURE_MAX_ENTRIES, parseProcedures, upsertProcedure, formatProcedureIndex, type ProcedureEntry } from "./procedure.js";
 export type { ShellSpec };

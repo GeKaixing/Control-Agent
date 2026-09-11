@@ -1,4 +1,4 @@
-# tools/ —— 27 个内置工具
+# tools/ —— 28 个内置工具
 
 **关注点**：把模型能调用的「动作」都收口在这里。模型看到的是 `LlmTool[]`（带 JSON Schema
 签名），执行时拿到的是 `Tool.execute(args, ctx)` 的统一签名。每个工具都标 `isMutating`
@@ -84,6 +84,7 @@ function fail(text: string): ToolResult;
 | `phone_panel` | 打开/关闭手机镜像面板（给人看的实时画面） | false | `action`（open/close/status）；与 mobile_* 互补——面板展示给用户/让用户手动操作，mobile_* 是模型操作通道，两者可同时用；open 与浏览器面板互斥；端点经 `setPhonePanelBackend()` 注入（desktop/main/index.ts），CLI 端优雅 fail |
 | `uia_tree` | 桌面控件树（UIA 文本层） | false | `title?`（窗口/应用名子串；不给 = 只列顶层窗口索引）、`maxNodes?`；输出中心坐标可直接给 computer |
 | `procedure` | 程序性记忆：GUI 操作流程存取（用户级 ~/.control-agent/procedures.md，跨项目共享） | true | `action`（save/search/list/forget）+ `app`、`platform`（desktop/mobile/browser）、`steps?`、`title?`、`env?`（App 版本/窗口大小等，OS 自动盖章）、`query?`；同 app+平台重存=覆盖更新；索引经 session.ts collectProcedureIndex 注入系统提示词 |
+| `watch` | 会话内持续监控（定时巡检，真·持续聊天基座） | false | `action`（start/stop/status）+ `intervalSec?`（10~3600s）、`target?`、`instruction?`；宿主注入 WatchController（CLI REPL / 桌面端），tick 以巡检消息注入当前会话；与 cron 分工：cron 管跨会话日程，watch 管当前会话内高频巡检 |
 
 ### ask_user 通道注入约定
 
