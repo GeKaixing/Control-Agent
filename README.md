@@ -1,5 +1,9 @@
 # Control-Agent
 
+<p align="center">
+  <img src="docs/logo.png" alt="Control-Agent logo" width="280">
+</p>
+
 用 TypeScript 从零实现的终端编码代理。核心是一个**外层循环 + 内层循环**的双层结构，配一套与厂商无关的统一大模型接口和可插拔工具。
 
 不配任何 API key 也能直接跑起来——缺 key 时会自动降级到内置的 mock 模型，把整条链路走通。
