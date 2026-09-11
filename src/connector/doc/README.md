@@ -13,6 +13,17 @@
 
 ---
 
+> **实现状态（2026-09-11 盘点）**：本文是 v0.1 愿景文档，比当前实现超前。
+> **已落地**：Loader（本地目录扫描 + `manifest.enabledBy` 门控）、Registry
+> （内存 Map）、Runtime（生命周期 + execute 路由）、MCP Server（tools + callTool）、
+> 示例 connector（ffmpeg、desktop-display）。
+> **未落地（按文中 Phase 划分）**：权限审批（manifest `permissions` 仅记录，§11）、
+> `~/.connector-runtime/config.json` 持久配置（§12）、npm install / 远程包与商店
+> （§13–§16 的安装体系）、Blender / LibreOffice / GitHub connector（§8、Phase 2）、
+> 独立 security/ 模块（§3 目录里的 `security`）。以代码为准：`src/connector/`。
+
+---
+
 # Connector Runtime 开发文档
 
 版本：v0.1
