@@ -24,6 +24,8 @@ import type { JsonSchema } from "../providers/types.js";
 import type { Tool } from "./types.js";
 import { fail, ok } from "./types.js";
 import { macClickScript, macDragScript, macFocusScript, macHotkeyScript, macPasteScript, macScrollScript, mapMacHotkey, runJxa } from "./darwin-cu.js";
+import { lastScreenshot } from "./screenshot.js";
+import { uitarsToScreenshotCoords } from "./uitars-coords.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -164,14 +166,60 @@ const PARAMETERS: JsonSchema = {
     keys: { type: "string", description: "hotkey 的组合键，空格分隔小写，如 'ctrl c'、'alt tab'、'ctrl shift t'。最多 3 键。" },
     direction: { type: "string", enum: ["up", "down"], description: "scroll 方向" },
     amount: { type: "number", description: "scroll 滚动格数，默认 3" },
+    uitarsBox: {
+      type: "string",
+      description:
+        "UI-TARS 系模型的坐标：'(x,y)' 或 '(x1,y1,x2,y2)'（smart_resize 空间）。" +
+        "传入后由 harness 依据最近一次 screenshot 的尺寸自动换算并取中心，忽略 x/y。",
+    },
+    uitarsBox2: {
+      type: "string",
+      description: "drag 终点的 UI-TARS 坐标框（语义同 uitarsBox），传入后忽略 x2/y2。",
+    },
   },
   required: ["action"],
 };
 
+/**
+ * UI-TARS 通道换算：args 里的 uitarsBox/uitarsBox2（smart_resize 空间坐标串）
+ * → 截图像素中心点。纯函数（尺寸由调用方传），导出供单测。
+ *
+ * 返回 null：没传 uitars 参数，走原 x/y 通道。
+ * 返回 string：参数非法，直接作为 fail 文案。
+ */
+export function resolveUitarsOverride(
+  args: Record<string, unknown>,
+  shotW: number,
+  shotH: number,
+): { x: number; y: number; x2?: number; y2?: number } | string | null {
+  const box = args["uitarsBox"];
+  if (box === undefined) return null;
+  if (shotW <= 0 || shotH <= 0) {
+    return "uitarsBox 换算需要截图尺寸：请先成功执行一次 screenshot。";
+  }
+  try {
+    const p = uitarsToScreenshotCoords(String(box), shotW, shotH);
+    const out: { x: number; y: number; x2?: number; y2?: number } = {
+      x: Math.round(p.x),
+      y: Math.round(p.y),
+    };
+    const box2 = args["uitarsBox2"];
+    if (box2 !== undefined) {
+      const p2 = uitarsToScreenshotCoords(String(box2), shotW, shotH);
+      out.x2 = Math.round(p2.x);
+      out.y2 = Math.round(p2.y);
+    }
+    return out;
+  } catch (err) {
+    return String(err).replace(/^Error:\s*/, "");
+  }
+}
+
 export const computerTool: Tool = {
   name: "computer",
   description:
-    "操作电脑：鼠标点击/双击/右键、文本输入、快捷键、滚动。坐标必须来自最近一次 screenshot 的图片像素。" +
+    "操作电脑：鼠标点击/双击/右键、文本输入、快捷键、滚动。坐标必须来自最近一次 screenshot 的图片像素；" +
+    "UI-TARS 系模型输出的 smart_resize 坐标框用 uitarsBox/uitarsBox2 传，harness 自动换算。" +
     "输入文本会覆盖剪贴板。支持 Windows 与 macOS（macOS 需辅助功能权限）。",
   parameters: PARAMETERS,
   isMutating: true,
@@ -180,6 +228,19 @@ export const computerTool: Tool = {
       return fail("computer 支持 Windows 与 macOS，当前平台不支持。");
     }
     const action = String(args["action"] ?? "");
+
+    // UI-TARS 通道：smart_resize 坐标 → 截图像素（有 uitarsBox 时覆盖 x/y）
+    const uitars = resolveUitarsOverride(args, lastScreenshot.w, lastScreenshot.h);
+    if (typeof uitars === "string") return fail(`computer：${uitars}`);
+    if (uitars !== null) {
+      args["x"] = uitars.x;
+      args["y"] = uitars.y;
+      if (uitars.x2 !== undefined) {
+        args["x2"] = uitars.x2;
+        args["y2"] = uitars.y2;
+      }
+    }
+
     const x = Number(args["x"] ?? 0);
     const y = Number(args["y"] ?? 0);
 
