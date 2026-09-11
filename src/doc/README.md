@@ -18,9 +18,9 @@ verbatimModuleSyntax）按职责切分成若干子模块，对外唯一入口是
 | [`providers/`](./providers/doc/README.md) | 模型适配器：把 OpenAI / Anthropic / mock 的流式协议收敛成同一个 `StreamFn` | `openai.ts`、`anthropic.ts`、`mock.ts`、`stream.ts`、`types.ts`、`index.ts` |
 | [`tools/`](./tools/doc/README.md) | 7 个内置工具（read / write / edit / bash / glob / grep / memory）：注册表、参数校验、共享文件系统辅助、跨会话记忆 | `index.ts`、`types.ts`、`validate.ts`、`fs-utils.ts`、`*Tool.ts` |
 | [`ui/`](./ui/doc/README.md) | 终端交互：REPL 输入控制器、AgentEvent 着色渲染器、Markdown → ANSI、print 模式收敛 | `input.ts`、`renderer.ts`、`markdown.ts`、`print.ts` |
-| [`log/`](./log/doc/README.md) | 文件日志：故障现场落盘到 `.c-agent/logs/`（按天一份、级别分级、绝不抛错） | `logger.ts`、`index.ts` |
+| [`log/`](./log/doc/README.md) | 文件日志：故障现场落盘到 `.control-agent/logs/`（按天一份、级别分级、绝不抛错） | `logger.ts`、`index.ts` |
 
-顶层单文件模块（不占子目录）：[`session.ts`](../session.ts) 是装配层（CLI 与桌面端共用的会话启动逻辑）。用户配置持久化（`.c-agent/config.json`，存 `/model` 选过的模型 spec 或「自定义模型」完整参数，两者互斥，启动优先级 `--model`（仅 CLI）> `MODEL` env > 持久值 > 内置默认）归 [`context/sessions.ts`](./context/doc/README.md)。`.c-agent/` 的落盘分两条线：**数据**（sessions / config）只有 `sessions.ts` 一个出口；**运行日志**（`logs/`）归 [`log/`](./log/doc/README.md)——互不掺和，不另设第三套。
+顶层单文件模块（不占子目录）：[`session.ts`](../session.ts) 是装配层（CLI 与桌面端共用的会话启动逻辑）。用户配置持久化（`.control-agent/config.json`，存 `/model` 选过的模型 spec 或「自定义模型」完整参数，两者互斥，启动优先级 `--model`（仅 CLI）> `MODEL` env > 持久值 > 内置默认）归 [`context/sessions.ts`](./context/doc/README.md)。`.control-agent/` 的落盘分两条线：**数据**（sessions / config）只有 `sessions.ts` 一个出口；**运行日志**（`logs/`）归 [`log/`](./log/doc/README.md)——互不掺和，不另设第三套。
 
 ## 数据流总图
 

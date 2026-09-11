@@ -3,7 +3,7 @@
 ## 职责
 
 把进程内的故障现场（模型流失败、工具异常、顶层崩溃）落盘到
-`<cwd>/.c-agent/logs/agent-YYYY-MM-DD.log`，让「终端一闪而过的报错」变成
+`<cwd>/.control-agent/logs/agent-YYYY-MM-DD.log`，让「终端一闪而过的报错」变成
 「可以事后翻的错误记录」。
 
 ## 对外接口
@@ -32,7 +32,7 @@
 2. **同步写**（`appendFileSync`）：日志量低（默认 info 起），换「崩溃前最后一行
    一定在盘上」。
 3. **保留最近 7 份**：初始化时清理更早的按天文件。
-4. **`.c-agent/` 分治**：数据（sessions / config）归 `context/sessions.ts`，
+4. **`.control-agent/` 分治**：数据（sessions / config）归 `context/sessions.ts`，
    运行日志归本模块——两条落盘路径，互不掺和。
 
 ## 接入点

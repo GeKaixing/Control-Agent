@@ -103,12 +103,12 @@ export interface SessionDeps {
    */
   approvalPrompt?: (req: { toolName: string; args: string }) => Promise<"allow" | "always" | "deny">;
   /**
-   * 模型变更后的持久化钩子：主进程注入（写 .c-agent/config.json，与 CLI 共用同一份）。
+   * 模型变更后的持久化钩子：主进程注入（写 .control-agent/config.json，与 CLI 共用同一份）。
    * 缺省 noop——单测不落盘。spec 版触发点：setModel / setEndpoint 成功后。
    */
   persistModel?: (spec: string) => void;
   /**
-   * 自定义模型持久化钩子（同写 .c-agent/config.json，与 spec 互斥——最后一次的
+   * 自定义模型持久化钩子（同写 .control-agent/config.json，与 spec 互斥——最后一次的
    * 选择是唯一真相）。触发点：setCustomModel 成功后。完整参数（provider/id/
    * baseUrl/apiKey/contextWindow）自描述，重启后可直接重建 ModelRef——
    * 早期版本「自定义模型不落盘」是错的：那正是用户重启后配置全丢的原因。
@@ -740,7 +740,7 @@ export class SessionManager {
   }
 
   /**
-   * 磁盘上的持久化会话清单（.c-agent/sessions/，新的在前）。与内存标签页
+   * 磁盘上的持久化会话清单（.control-agent/sessions/，新的在前）。与内存标签页
    * （listSessions）是两个集合：这里含 CLI 与之前退出时落盘的会话。
    * 使用中（任一标签页占用）的条目标 locked，UI 禁删。
    */
@@ -1431,7 +1431,7 @@ export class SessionManager {
       // 32k 的小模型第一轮就按小预算裁剪而不是撞墙后靠降档补救。
       // Agent 每次提交都新建，预热到的新窗口值下一轮自然生效。
       transform: { maxContextTokens: maxContextTokensFor(this.currentContextWindow()) },
-      // 会话持久化：agent_end 后整树落盘 <cwd>/.c-agent/sessions/<id>.json（原子写，
+      // 会话持久化：agent_end 后整树落盘 <cwd>/.control-agent/sessions/<id>.json（原子写，
       // 同一会话复用同一 id）。失败只发 notice，不影响对话。
       persistSessions: true,
       // Context 支柱：自动压缩开关跟随设置弹窗的偏好

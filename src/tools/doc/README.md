@@ -1,4 +1,4 @@
-# tools/ —— 25 个内置工具
+# tools/ —— 27 个内置工具
 
 **关注点**：把模型能调用的「动作」都收口在这里。模型看到的是 `LlmTool[]`（带 JSON Schema
 签名），执行时拿到的是 `Tool.execute(args, ctx)` 的统一签名。每个工具都标 `isMutating`
@@ -78,10 +78,12 @@ function fail(text: string): ToolResult;
 | `browser_intercept` | 拦截/改写页面网络请求（CDP Fetch 域） | true | `urlPattern`（* 通配）+ `action`（block/fulfill）+ `status?/body?/contentType?`、`mode?`（set 缺省/clear）；规则累积生效 |
 | `browser_cookie` | Cookie 管理（CDP Network 域） | true | `mode`（list 缺省/set/delete）+ `name?/value?/url?/domain?/path?/secure?/httpOnly?`；set 需要 url 或 domain 至少一个；httpOnly cookie 只有这条通道能读写 |
 | `browser_file` | 文件通道（上传/下载记录） | true | `action`（upload/downloads）+ `selector?`（file input 的 CSS 选择器）+ `paths?`（本地绝对路径）；下载静默落盘到系统下载目录（重名自动加序号），不弹保存对话框 |
-| `mobile_screen` | 手机截屏（adb screencap） | false | `serial?`（多设备必填）；PNG dataUrl + `wm size`，坐标语义同 screenshot |
-| `mobile_ui` | 手机控件树（uiautomator dump） | false | `serial?`；输出 text/desc/id/bounds 中心坐标的控件清单——手机 GUI 的文本层主力 |
-| `mobile_act` | 手机操作（input/am start） | true | `action`（tap/swipe/text/key/start）+ `x/y`、`x2/y2?`、`durationMs?`、`content?`、`key?`、`target?`、`serial?`；坐标用 mobile_ui 的 bounds 中心最稳 |
+| `mobile_screen` | 手机截屏（adb screencap） | false | `serial?`（多设备必填）+ `adb?`（入口别名 mumu/ld/nox/bluestacks/sdk 或 adb.exe 路径，缺省自动探测）；PNG dataUrl + `wm size`，坐标语义同 screenshot |
+| `mobile_ui` | 手机控件树（uiautomator dump） | false | `serial?` + `adb?`；输出 text/desc/id/bounds 中心坐标的控件清单——手机 GUI 的文本层主力 |
+| `mobile_act` | 手机操作（input/am start） | true | `action`（tap/swipe/text/key/start）+ `x/y`、`x2/y2?`、`durationMs?`、`content?`、`key?`、`target?`、`serial?`、`adb?`；坐标用 mobile_ui 的 bounds 中心最稳 |
+| `phone_panel` | 打开/关闭手机镜像面板（给人看的实时画面） | false | `action`（open/close/status）；与 mobile_* 互补——面板展示给用户/让用户手动操作，mobile_* 是模型操作通道，两者可同时用；open 与浏览器面板互斥；端点经 `setPhonePanelBackend()` 注入（desktop/main/index.ts），CLI 端优雅 fail |
 | `uia_tree` | 桌面控件树（UIA 文本层） | false | `title?`（窗口/应用名子串；不给 = 只列顶层窗口索引）、`maxNodes?`；输出中心坐标可直接给 computer |
+| `procedure` | 程序性记忆：GUI 操作流程存取（用户级 ~/.control-agent/procedures.md，跨项目共享） | true | `action`（save/search/list/forget）+ `app`、`platform`（desktop/mobile/browser）、`steps?`、`title?`、`env?`（App 版本/窗口大小等，OS 自动盖章）、`query?`；同 app+平台重存=覆盖更新；索引经 session.ts collectProcedureIndex 注入系统提示词 |
 
 ### ask_user 通道注入约定
 
@@ -136,8 +138,14 @@ function fail(text: string): ToolResult;
 - **坐标口径**：mobile_ui/mobile_screen 的坐标都是手机屏幕像素（同一坐标系），
   bounds 中心点最稳；uia_tree 输出的是桌面屏幕物理像素（Windows）/ 逻辑点
   （macOS），可直接给 computer。各通道坐标不通用，别跨通道喂。
-- **多设备**：mobile_* 的 `serial` 参数缺省时用唯一设备；adb 报
-  "more than one device" 时 fail 信息里带 `adb devices` 的设备列表。
+- **多 adb 入口（模拟器场景）**：MuMu/雷电/夜神/BlueStacks 都自带独立 adb，
+  PATH 的 SDK adb 看不到模拟器设备。mobile_* 的 `adb` 参数选入口（别名或
+  adb.exe 绝对路径），缺省自动探测全部入口并合并设备列表（`resolveAdbEntries`，
+  纯 existsSync）；设备按 serial 路由到所属入口（`routeAdbDevice`），扫不到
+  设备时对各家典型端口自动 `adb connect` 一轮再重扫。env `C_AGENT_ADB` 可
+  覆盖 sdk 入口的 adb 路径。环境快照会列出已探测到的模拟器入口。
+- **多设备**：mobile_* 的 `serial` 参数缺省时用唯一可用设备；多台时报设备
+  列表（含入口归属）让模型补 serial。
 - **转义**：`mobile_act` 的 text 走设备端单引号包裹（`'` → `'\''`），空格转
   `%s`（input text 的官方约定）；任意 adb 命令仍可直接走 bash。
 - **下载**：browser-view.ts 的 will-download 静默落盘到系统下载目录（重名加

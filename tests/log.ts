@@ -42,7 +42,7 @@ test("log: 级别过滤 + 错误对象带 stack 落盘", async () => {
 
 test("log: 初始化时清理旧文件，保留最近 7 份", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "agent-test-log-"));
-  const logsDir = path.join(tmp, ".c-agent", "logs"); // 与 logger 的目录口径一致
+  const logsDir = path.join(tmp, ".control-agent", "logs"); // 与 logger 的目录口径一致
   // 造 9 份旧日志（9 天前 → 1 天前）
   for (let i = 9; i >= 1; i--) {
     await fs.mkdir(logsDir, { recursive: true });
@@ -75,7 +75,7 @@ test("log: 目录不可写时静默禁用，绝不抛错", async () => {
   // 恢复到正常目录后继续可用（disabled 被重置）
   initFileLogging(tmp, { level: "info" });
   log.error("t", "恢复后的第一行");
-  const recovered = await fs.readdir(path.join(tmp, ".c-agent", "logs"));
+  const recovered = await fs.readdir(path.join(tmp, ".control-agent", "logs"));
   assert.ok(recovered.some((f) => f.startsWith("agent-")), "恢复后应能写盘");
 });
 

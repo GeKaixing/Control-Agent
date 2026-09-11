@@ -1,7 +1,7 @@
 /**
- * Cron 模块：任务持久化 —— .c-agent/cron/jobs.json，一套纪律。
+ * Cron 模块：任务持久化 —— .control-agent/cron/jobs.json，一套纪律。
  *
- * 与 sessions.ts（.c-agent/sessions/）同一套落盘纪律：原子写（tmp + rename）、
+ * 与 sessions.ts（.control-agent/sessions/）同一套落盘纪律：原子写（tmp + rename）、
  * 版本字段、坏文件静默回退为空表——定时任务存不上不该让 agent 崩，
  * 丢一份任务清单的代价远小于把整个进程拖死。
  *
@@ -14,7 +14,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { nextCronRun } from "./parser.js";
 
-export const CRON_DIR = path.join(".c-agent", "cron");
+export const CRON_DIR = path.join(".control-agent", "cron");
 
 const CRON_VERSION = 1;
 
@@ -39,7 +39,7 @@ interface StoredCron {
   jobs: CronJob[];
 }
 
-/** jobs.json 的绝对路径（.c-agent/ 下与 sessions / config 同级，同一套纪律） */
+/** jobs.json 的绝对路径（.control-agent/ 下与 sessions / config 同级，同一套纪律） */
 export function cronJobsPath(cwd: string): string {
   return path.join(cwd, CRON_DIR, "jobs.json");
 }

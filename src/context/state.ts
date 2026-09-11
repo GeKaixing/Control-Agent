@@ -110,6 +110,27 @@ export function buildSystemPrompt(
     );
   }
 
+  if (names.has("phone_panel")) {
+    workRules.push(
+      "用户想看手机画面、要求在手机上演示，或需要「边操作边给用户看」时，" +
+      "用 phone_panel 打开内部手机镜像面板，再用 mobile_* 工具执行具体操作" +
+      "（面板画面会实时反映操作结果）；模型自己批量/精确操作手机则直接用 " +
+      "mobile_screen / mobile_ui / mobile_act，不必开面板。",
+    );
+  }
+
+  if (names.has("computer") || names.has("mobile_act")) {
+    workRules.push(
+      "操作桌面或手机 App 时善用操作记忆：动手前若该 App 可能被操作过，先用 procedure 工具 search " +
+      "现成流程，并核对记忆里的环境（系统/App 版本/分辨率）与当前是否一致——一致才照做，不一致就重新摸索；" +
+      "成功跑通一套操作流程、或发现旧记忆与实际界面不符时，用 procedure save 保存/更新" +
+      "「App 名 + 平台（desktop/mobile/browser）+ env 环境信息 + 步骤要点」。" +
+      "env 要写影响操作路径的因素（App 版本号、窗口大小/分辨率、模拟器实例等），系统信息会自动记录；" +
+      "步骤要写到下次不看屏幕也能照做的程度（点哪个按钮、输入什么、用什么快捷键），" +
+      "通用经验（如某软件的设置入口路径）也要记进去。",
+    );
+  }
+
   if (names.has("grep") || names.has("glob")) {
     workRules.push(
       "任务涉及项目内容时，查找优先用 grep / glob 定位，避免整文件大段读入；动手改之前先把上下文看清楚。",
@@ -130,7 +151,7 @@ export function buildSystemPrompt(
     // identity：不自我设限为「编码代理」——那会让模型把非编码请求
     // （搜新闻、查行情）当越界拒绝。能力事实写足，角色边界交给模型判断。
     "你是一个运行在终端与桌面端的智能助手：擅长编码，也能操控内部浏览器面板、" +
-    "截屏与键鼠来自主完成搜索、查证等各类任务。需要动手就直接动手。",
+    "手机镜像面板、截屏与键鼠来自主完成搜索、查证、设备操控等各类任务。需要动手就直接动手。",
     `运行时：${process.platform} / Node ${process.version}`,
     // Environment 支柱：日期与 shell 是模型最高频的两个猜测源（版本 pin、
     // 「最近」类判断、zsh/bash 语法差异）——事实给足，不写补救规则

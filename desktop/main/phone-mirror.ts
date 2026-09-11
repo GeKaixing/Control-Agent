@@ -8,75 +8,92 @@
  * （原生视图会盖住 DOM 面板，见 index.ts 的 PHONE_OPEN / BROWSER_OPEN）。
  *
  * 零 npm 依赖：PNG 解码 / JPEG 压缩用 Electron 自带 nativeImage（toJPEG），
- * adb 走 execFile 子进程。真机 USB 接入时把其序列号纳入 pickSerial 的选择顺序即可复用整条链路。
+ * adb 走 execFile 子进程。设备发现复用 src/tools/mobile.ts 的多 adb 入口表
+ * （PATH adb + MuMu/雷电/夜神/BlueStacks 自带 adb），真机 USB 接入同样适用。
  *
  * 实测踩过的坑（对策已固化在代码里，不要「优化」掉）：
- * ① adb 版本战争——platform-tools 与 MuMu 自带 adb 并存时互相杀 server，
- *    adb 路径探测必须 MuMu 安装目录优先，PATH 兜底；
- * ② MuMu 的 adb 管理会话随调用结束失效——**每次命令前都先 connect**（幂等）；
+ * ① adb 版本战争——platform-tools 与模拟器自带 adb 并存时互相杀 server。
+ *    对策不是「某个 adb 优先」，而是**每台设备固定用发现它的那个入口 bin**：
+ *    各入口只扫各家的 connect 端口，命令原路发回，互不串台；
+ * ② 模拟器的 adb 管理会话随调用结束失效——**每次命令前都先 connect**（幂等）；
  * ③ 模拟器横竖屏翻转分辨率会变——帧尺寸永远以截图实测为准，不许缓存。
- * ④ 端口漂移——多开/换实例后 MuMu 的 adb 端口不是固定的 16384（16384+32n），
+ * ④ 端口漂移——多开/换实例后模拟器 adb 端口不是固定的（MuMu 16384+32n），
  *    且设备可能只以 emulator-<n> 传输注册、TCP connect 拒绝。序列号必须动态
- *    探测（MUMU_PORTS 预 connect + `adb devices` 解析），不许写死。
+ *    探测（各入口预 connect + `adb devices` 解析合并），不许写死。
  */
 
 import { execFile } from "node:child_process";
 import { nativeImage } from "electron";
+import { mergeAdbScans, parseAdbList, resolveAdbEntries, type AdbEntry, type MergedDevice } from "../../src/tools/mobile.js";
 import type { PhoneFrameInfo, PhoneStateInfo } from "../shared/api.js";
 
 /**
- * 目标设备解析。MuMu 12 实例 n 的 adb 端口惯例是 16384 + 32*n，但多开、
- * 换实例、emulator-<n> 型传输都会让写死的序列号失效（实测：实例 0 关闭、
- * 实例 1 运行时监听 16416，且 `adb devices` 只认 emulator-5556）。
- * 对策：先按端口惯例预 connect（幂等、未监听秒拒），再从 `adb devices`
- * 现拿现用——优先 MuMu TCP 口，其次任意 127.0.0.1:，最后 emulator-*。
+ * 目标设备解析。模拟器实例的 adb 端口会漂移（MuMu 12 = 16384 + 32*n），
+ * 且设备可能只以 emulator-<n> 传输注册（实测：实例 0 关闭、实例 1 运行时
+ * 监听 16416，且 `adb devices` 只认 emulator-5556）。对策：对各入口的典型
+ * 端口预 connect（幂等、未监听秒拒），再合并各入口 `adb devices` 现拿现用
+ * ——优先模拟器 TCP 口，其次任意 127.0.0.1:，最后 emulator-*。
  */
-const MUMU_PORTS = [16384, 16416, 16448, 16480];
 const PROBE_INTERVAL_MS = 3_000;
 
-let cachedSerial: string | null = null;
+/** 一台已解析的设备：serial + 发现它的 adb 入口（命令原路发回，避免版本战争）。 */
+interface PhoneDevice {
+  serial: string;
+  bin: string;
+}
+
+let cachedDevice: PhoneDevice | null = null;
 let currentSerial: string | null = null;
 let lastProbeAt = 0;
 
-/** 从 `adb devices` 输出里挑设备：只认 device 状态，跳过 offline/unauthorized。 */
-function pickSerial(devicesOutput: string): string | null {
-  const found: string[] = [];
-  for (const line of devicesOutput.split(/\r?\n/).slice(1)) {
-    const m = line.trim().match(/^(\S+)\s+device\s*$/);
-    if (m !== null) found.push(m[1]);
-  }
-  if (found.length === 0) return null;
+/** adb 入口集合：env PHONE_ADB 可插队（别名或 adb.exe 路径）；缺省自动探测全部入口。 */
+function adbEntries(): AdbEntry[] {
+  const explicit = process.env.PHONE_ADB?.trim() ?? "";
+  const resolved = resolveAdbEntries(explicit);
+  return Array.isArray(resolved) ? resolved : [{ name: "sdk", bin: "adb", ports: [] }];
+}
+
+/** 从合并后的设备列表挑镜像目标：只认 device 状态，跳过 offline/unauthorized。 */
+function pickDevice(devices: MergedDevice[]): MergedDevice | null {
+  const usable = devices.filter((d) => d.state === "device");
   return (
-    found.find((s) => /^127\.0\.0\.1:16\d{3}$/.test(s)) ??
-    found.find((s) => s.startsWith("127.0.0.1:")) ??
-    found.find((s) => s.startsWith("emulator-")) ??
-    found[0]
+    usable.find((d) => /^127\.0\.0\.1:16\d{3}$/.test(d.serial)) ??
+    usable.find((d) => d.serial.startsWith("127.0.0.1:")) ??
+    usable.find((d) => d.serial.startsWith("emulator-")) ??
+    usable[0] ??
+    null
   );
 }
 
-/** 解析当前设备序列号（带缓存；探测节流 3s，避免 600ms 轮询被放大）。 */
-async function resolveSerial(exe: string): Promise<string | null> {
-  if (cachedSerial !== null && Date.now() - lastProbeAt < PROBE_INTERVAL_MS) return cachedSerial;
+/** 解析当前设备（带缓存；探测节流 3s，避免 600ms 轮询被放大）。 */
+async function resolveDevice(): Promise<PhoneDevice | null> {
+  if (cachedDevice !== null && Date.now() - lastProbeAt < PROBE_INTERVAL_MS) return cachedDevice;
   lastProbeAt = Date.now();
-  for (const port of MUMU_PORTS) {
-    try {
-      await run(exe, ["connect", `127.0.0.1:${port}`], 1_000);
-    } catch {
-      // 未监听的端口秒拒，忽略即可
-    }
-  }
-  try {
-    cachedSerial = pickSerial(await run(exe, ["devices"], ADB_TIMEOUT_MS));
-  } catch {
-    cachedSerial = null;
-  }
-  if (cachedSerial !== null) currentSerial = cachedSerial;
-  return cachedSerial;
+  const scans = await Promise.all(
+    adbEntries().map(async (entry) => {
+      for (const port of entry.ports) {
+        try {
+          await run(entry.bin, ["connect", `127.0.0.1:${String(port)}`], 1_000);
+        } catch {
+          // 未监听的端口秒拒，忽略即可
+        }
+      }
+      try {
+        return { entry, devices: parseAdbList(await run(entry.bin, ["devices"], ADB_TIMEOUT_MS)) };
+      } catch {
+        return { entry, devices: [] };
+      }
+    }),
+  );
+  const hit = pickDevice(mergeAdbScans(scans));
+  cachedDevice = hit !== null ? { serial: hit.serial, bin: hit.entry.bin } : null;
+  if (cachedDevice !== null) currentSerial = cachedDevice.serial;
+  return cachedDevice;
 }
 
-/** 已缓存序列号失效时立即作废（下一轮重新探测，不等节流窗口）。 */
-function invalidateSerial(): void {
-  cachedSerial = null;
+/** 已缓存设备失效时立即作废（下一轮重新探测，不等节流窗口）。 */
+function invalidateDevice(): void {
+  cachedDevice = null;
   lastProbeAt = 0;
 }
 
@@ -86,35 +103,6 @@ const POLL_INTERVAL_MS = 600;
 /** 单条 adb 命令超时；截图（大负载）单独放宽。 */
 const ADB_TIMEOUT_MS = 6_000;
 const CAPTURE_TIMEOUT_MS = 10_000;
-
-/** adb 可执行文件探测候选（按优先级）。环境变量 PHONE_ADB 可插队置顶。 */
-function adbCandidates(): string[] {
-  const list = [
-    process.env.PHONE_ADB,
-    "D:/Program Files/Netease/MuMu Player 12/shell/adb.exe",
-    "C:/Program Files/Netease/MuMu Player 12/shell/adb.exe",
-  ].filter((p): p is string => typeof p === "string" && p.length > 0);
-  list.push("adb");
-  return list;
-}
-
-let resolvedAdb: string | null = null;
-
-/** 探测并缓存可用的 adb（每条候选跑一次 version，第一个成功者胜出）。 */
-async function resolveAdb(): Promise<string> {
-  if (resolvedAdb !== null) return resolvedAdb;
-  let lastErr: unknown = null;
-  for (const exe of adbCandidates()) {
-    try {
-      await run(exe, ["version"], ADB_TIMEOUT_MS);
-      resolvedAdb = exe;
-      return exe;
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  throw lastErr instanceof Error ? lastErr : new Error("找不到可用的 adb（未安装 MuMu 且 PATH 里没有 adb）");
-}
 
 /** 裸 execFile Promise 封装（文本输出）。 */
 function run(exe: string, args: string[], timeoutMs: number): Promise<string> {
@@ -137,21 +125,20 @@ function runBuffer(exe: string, args: string[], timeoutMs: number): Promise<Buff
 }
 
 /**
- * 执行一条设备命令。每次都先解析序列号（TCP 序列号额外 connect，幂等）：
- * MuMu 的 adb server 会被外部 adb 调用顶掉，会话不保活——实测结论。
+ * 执行一条设备命令。每次都先解析设备（TCP 序列号额外 connect，幂等）：
+ * 模拟器的 adb server 会被外部 adb 调用顶掉，会话不保活——实测结论。
  */
 async function adb(args: string[], timeoutMs: number = ADB_TIMEOUT_MS): Promise<string> {
-  const exe = await resolveAdb();
-  const serial = await resolveSerial(exe);
-  if (serial === null) throw new Error("未检测到设备（请启动 MuMu 模拟器）");
-  if (serial.includes(":")) {
+  const dev = await resolveDevice();
+  if (dev === null) throw new Error("未检测到设备（启动安卓模拟器或插入已开启 USB 调试的真机后自动重连）");
+  if (dev.serial.includes(":")) {
     try {
-      await run(exe, ["connect", serial], 3_000);
+      await run(dev.bin, ["connect", dev.serial], 3_000);
     } catch {
       // connect 失败不致命：后面的 -s 命令会给出真实错误
     }
   }
-  return run(exe, ["-s", serial, ...args], timeoutMs);
+  return run(dev.bin, ["-s", dev.serial, ...args], timeoutMs);
 }
 
 let stateListener: ((s: PhoneStateInfo) => void) | null = null;
@@ -180,17 +167,16 @@ function pushState(): void {
 
 /** 截一帧并压缩。设备不可达 / 图像为空时返回 null（connected 随之翻转）。 */
 async function captureFrame(): Promise<PhoneFrameInfo | null> {
-  const exe = await resolveAdb();
-  const serial = await resolveSerial(exe);
-  if (serial === null) return null;
-  if (serial.includes(":")) {
+  const dev = await resolveDevice();
+  if (dev === null) return null;
+  if (dev.serial.includes(":")) {
     try {
-      await run(exe, ["connect", serial], 3_000);
+      await run(dev.bin, ["connect", dev.serial], 3_000);
     } catch {
       // 同 adb()：交给 screencap 报真实错误
     }
   }
-  const png = await runBuffer(exe, ["-s", serial, "exec-out", "screencap", "-p"], CAPTURE_TIMEOUT_MS);
+  const png = await runBuffer(dev.bin, ["-s", dev.serial, "exec-out", "screencap", "-p"], CAPTURE_TIMEOUT_MS);
   const img = nativeImage.createFromBuffer(png);
   if (img.isEmpty()) return null;
   const { width, height } = img.getSize();
@@ -205,7 +191,7 @@ async function pollOnce(): Promise<void> {
     if (frame !== null) frameListener?.(frame);
   } catch {
     connected = false;
-    invalidateSerial();
+    invalidateDevice();
   }
   pushState();
 }
@@ -247,6 +233,11 @@ export function close(): void {
 
 export function isOpen(): boolean {
   return openFlag;
+}
+
+/** 当前面板状态快照（phone_panel 工具的 status 用）。 */
+export function state(): PhoneStateInfo {
+  return snapshot();
 }
 
 /** 手动补一帧（渲染层面板挂载 / 用户点刷新时调用；面板未开时忽略）。 */

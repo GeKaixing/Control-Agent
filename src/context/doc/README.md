@@ -181,11 +181,11 @@ class MessageQueue {
 
 ## 持久化（sessions.ts）：会话树 + 用户配置
 
-`.c-agent/` 目录的落盘只有这一个出口，一套纪律（原子写 tmp + rename、version
+`.control-agent/` 目录的落盘只有这一个出口，一套纪律（原子写 tmp + rename、version
 字段校验、坏文件静默回退），不另设第二套持久化。
 
 会话树（`AgentState.nodes`）可整体 JSON 序列化——每条消息是带 parent/children
-指针的节点，`saveSession` 原子写（tmp + rename）到 `.c-agent/sessions/<id>.json`，
+指针的节点，`saveSession` 原子写（tmp + rename）到 `.control-agent/sessions/<id>.json`，
 `loadSessionInto` 整树还原后从 ★ 重算线性视图；compact 留下的旧分支一并回来，
 `switchTo` 仍可回溯。接入点：
 
@@ -195,7 +195,7 @@ class MessageQueue {
   `/sessions rm <id>` 删除（前缀唯一匹配；当前会话拒绝删——自动保存会立刻重建）。
   `deleteSession` 校验 id 字符集（堵路径穿越），坏输入静默返回 false 不抛错。
 - **用户配置**（config.json）：`/model`（CLI）或桌面端的模型切换经 `saveModelSpec` 存
-  `.c-agent/config.json`（`readSavedModelSpec` 读回），启动时按 `--model` 参数（仅 CLI）>
+  `.control-agent/config.json`（`readSavedModelSpec` 读回），启动时按 `--model` 参数（仅 CLI）>
   `MODEL` env > 持久值 > 内置默认取用；`--model` 是一次性覆盖不落盘。存可回放的
   spec 字符串（`modelSpecString`），不存解析后的 ModelRef。**自定义模型**是另一条
   通道：完整参数（provider/id/baseUrl/apiKey/contextWindow）经 `saveCustomModel`

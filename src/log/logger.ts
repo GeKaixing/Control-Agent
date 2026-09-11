@@ -8,7 +8,7 @@
  *   禁用并放弃，绝不让主流程跟着失败；
  * - **同步写**：日志量很低（默认只记 info 以上），appendFileSync 换来的
  *   「崩溃前最后一行一定在盘上」比异步缓冲的吞吐重要得多；
- * - **按天分文件**：<cwd>/.c-agent/logs/agent-YYYY-MM-DD.log，初始化时清理
+ * - **按天分文件**：<cwd>/.control-agent/logs/agent-YYYY-MM-DD.log，初始化时清理
  *   只保留最近 KEEP_FILES 份，防止无限增长。
  *
  * 级别：debug < info < warn < error，外加 off。环境变量 C_AGENT_LOG 控制
@@ -26,8 +26,8 @@ export type LevelSetting = LogLevel | "off";
 
 const LEVEL_ORDER: Record<LevelSetting, number> = { debug: 0, info: 1, warn: 2, error: 3, off: 4 };
 
-/** 日志目录（相对 cwd）。.c-agent/ 由 sessions.ts（数据）与本模块（运行日志）分治 */
-const LOG_DIR = path.join(".c-agent", "logs");
+/** 日志目录（相对 cwd）。.control-agent/ 由 sessions.ts（数据）与本模块（运行日志）分治 */
+const LOG_DIR = path.join(".control-agent", "logs");
 const FILE_PREFIX = "agent-";
 /** 保留最近几份按天日志；更早的初始化时清理 */
 const KEEP_FILES = 7;

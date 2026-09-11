@@ -1,13 +1,13 @@
 /**
- * Context 支柱：.c-agent/ 目录的单一持久化出口（会话树 + 用户配置），一套纪律。
+ * Context 支柱：.control-agent/ 目录的单一持久化出口（会话树 + 用户配置），一套纪律。
  *
  * 之前会话树纯内存（AgentState.nodes），进程退出即消失——这是 v1 的刻意边界，
  * 本模块把它补上：树结构天然可 JSON 序列化，存取即可，不摘要不清洗
  * （哪些内容值得留是 transformContext 管线的事，这里只管字节）。
  *
- * 存储：<cwd>/.c-agent/sessions/<id>.json。会话 id 带时间戳前缀，
+ * 存储：<cwd>/.control-agent/sessions/<id>.json。会话 id 带时间戳前缀，
  * 文件名即时间线；原子写（tmp + rename），崩溃最多丢当前轮。
- * 用户配置存 <cwd>/.c-agent/config.json（目前只有 /model 选过的模型），
+ * 用户配置存 <cwd>/.control-agent/config.json（目前只有 /model 选过的模型），
  * 复用同一套原子写 / 版本校验 / 坏文件静默回退，不另起第二套持久化。
  *
  * 与 memory 工具（项目根 MEMORY.md）的分工：MEMORY.md 是模型自己决定记的
@@ -17,11 +17,12 @@
 
 import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { DATA_DIR, migrateDataDir } from "../paths.js";
 import { activeBranch, type AgentState, type MessageNode } from "./state.js";
 import type { ModelRef } from "../types.js";
 
 /** 会话文件目录（相对 cwd）；记忆文件在项目根，会话历史仍是隐藏运行时状态 */
-export const SESSIONS_DIR = path.join(".c-agent", "sessions");
+export const SESSIONS_DIR = path.join(".control-agent", "sessions");
 
 const SESSION_VERSION = 1;
 
@@ -42,6 +43,8 @@ export interface SessionSummary {
 }
 
 export function sessionsDir(cwd: string): string {
+  // 迁移钩子：桌面端会话数据锚 workspace cwd，读清单/落盘前先把旧 .c-agent 挪过来
+  migrateDataDir(cwd);
   return path.join(cwd, SESSIONS_DIR);
 }
 
@@ -183,14 +186,14 @@ export async function deleteSession(cwd: string, id: string): Promise<boolean> {
   }
 }
 
-// ────────────── 用户配置（.c-agent/config.json） ──────────────
+// ────────────── 用户配置（.control-agent/config.json） ──────────────
 
 const CONFIG_VERSION = 1;
 
 /**
  * 自定义模型持久值：完整参数自描述（baseUrl/apiKey 无法从 spec 字符串回放，
  * 所以自定义模型存对象不存 spec）。重启后据此直接重建 ModelRef。
- * apiKey 明文落盘——与 .env 放 key 同级风险，.c-agent/ 本就是本地明文目录。
+ * apiKey 明文落盘——与 .env 放 key 同级风险，.control-agent/ 本就是本地明文目录。
  */
 export interface StoredCustomModel {
   /** 协议（ModelRef.provider 原样）：openai / openai-responses / anthropic / gemini */
@@ -220,9 +223,10 @@ interface StoredConfig {
   updatedAt?: number;
 }
 
-/** config.json 的绝对路径（与 sessions 同在 .c-agent/，同一套落盘纪律） */
+/** config.json 的绝对路径（与 sessions 同在 .control-agent/，同一套落盘纪律） */
 export function configPath(cwd: string): string {
-  return path.join(cwd, ".c-agent", "config.json");
+  migrateDataDir(cwd);
+  return path.join(cwd, DATA_DIR, "config.json");
 }
 
 async function readConfig(cwd: string): Promise<StoredConfig | null> {
@@ -307,7 +311,7 @@ export async function saveWorkspaceCwd(cwd: string, dir: string | null): Promise
 }
 
 async function writeConfig(cwd: string, stored: StoredConfig): Promise<void> {
-  await mkdir(path.join(cwd, ".c-agent"), { recursive: true });
+  await mkdir(path.join(cwd, ".control-agent"), { recursive: true });
   const file = configPath(cwd);
   const tmp = `${file}.tmp`;
   await writeFile(tmp, JSON.stringify(stored), "utf8");

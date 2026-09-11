@@ -3,7 +3,7 @@
  *
  * 覆盖：
  *  - 私聊消息 → mock 回复 → sendText 收到答案
- *  - 会话持久化：处理完落 .c-agent/sessions/bot_wechat_<id>.json，第二个 runner 续接
+ *  - 会话持久化：处理完落 .control-agent/sessions/bot_wechat_<id>.json，第二个 runner 续接
  *  - 白名单之外的消息不触发 agent
  *  - 同聊天连发两条消息：串行处理，各得一条回复（followUps 合并语义由 Agent 保证）
  *  - splitReply 分块边界
