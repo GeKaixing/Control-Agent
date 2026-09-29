@@ -9,7 +9,9 @@ desktop/native/dictate
 
 # 代理工作记忆（.workbuddy/memory/），属于本地笔记，不进版本库
 .workbuddy/
-# c-agent 运行时本地状态：会话历史（.c-agent/sessions/，--resume 用）
+# Control-Agent 运行时本地状态：模型配置（config.json，含 apiKey！）、
+# 会话历史（sessions/，--resume 用）——与 .c-agent/ 同类，绝不进版本库
+.control-agent/
 .c-agent/
 # c-agent 跨会话记忆（memory 工具写入项目根，本地工作笔记不进版本库）
 /MEMORY.md

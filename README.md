@@ -20,7 +20,7 @@ Connector 插件运行时。
 - **会话树**：会话是树不是列表——任意节点可开分支、可回退重放，模型只看到当前分支的线性序列。
 - **上下文自动管理**：`transformContext` 三步走（清孤儿 → 压旧轮 → 迟滞裁剪），对 prompt cache 亲和。
 - **模型无关**：OpenAI / Anthropic / Gemini / mock 四个协议适配器收敛成同一个 `StreamFn`，外加 8 个厂商预设。
-- **内置 19 个工具**：文件读写编辑、bash、搜索、跨会话记忆、纯视觉 Computer Use、9 个浏览器控制工具、`ask_user` 提问通道。
+- **内置 28 个工具**：文件读写编辑、bash、搜索、跨会话记忆与程序性记忆、持续监控、纯视觉 Computer Use + UIA 控件树、adb 手机控制、11 个浏览器控制工具、`ask_user` 提问通道。
 - **Connector 插件运行时**：自研 Loader → Registry → Runtime，把外部软件/MCP server 暴露成原生工具，支持 `manifest.enabledBy` 门控。
 - **一个内核、三个入口**：CLI、Electron 桌面端、微信 Bot 共用同一个 Agent 类；另有 Cron 定时任务无头执行。
 - **审批门**：mutating 工具执行前过人工审批（桌面端），带 write/edit 的 diff 预览。
@@ -61,6 +61,12 @@ npm start -- --model mock                # 离线
 
 Windows 桌面端需 `--disable-gpu --no-sandbox` 启动，否则 GPU 进程崩溃退出。
 
+> **`desktop:dev:safe` 是什么**：在 `desktop:dev` 外层 unset 一批环境变量——
+> WorkBuddy IDE 会注入 brokered-fs shim（拦截 npm 的 mkdir/rename）、
+> `ELECTRON_RUN_AS_NODE`（把 Electron 钉死成纯 Node）等，普通终端里这些变量
+> 不存在，`desktop:dev` 与 `desktop:dev:safe` 等价。脚本里 unset 的每个变量
+> 的来历见 `~/.workbuddy` 全局工作记忆（npm install 同款坑）。
+
 ## 命令行参考
 
 | 参数 | 说明 |
@@ -100,7 +106,7 @@ npm start -- -p "这个项目是干什么的" --model mock | pbcopy    # 管道�
 阿里 Qwen、OpenRouter、OpenCode Zen、OpenCode Go（订阅）、Ollama（本地）。缺 key 一律降级
 mock 不抛错，提示语会给出真实的 env 变量名。
 
-## 工具（19 个）
+## 工具（28 个）
 
 **文件与执行**
 
@@ -112,24 +118,41 @@ mock 不抛错，提示语会给出真实的 env 变量名。
 | `bash` | 在工作目录下执行命令，超时 + 输出截断 | 是 |
 | `write` | 整文件写入，必要时自动创建目录 | 是 |
 | `edit` | 精确字符串替换，`oldString` 必须唯一 | 是 |
-| `memory` | 跨会话记忆（追加式存储，写入项目根 MEMORY.md） | 是 |
 
-**Computer Use（纯视觉）**
+**记忆与监控**
+
+| 工具 | 说明 | 会改文件 |
+| --- | --- | --- |
+| `memory` | 跨会话记忆（追加式存储，写入项目根 MEMORY.md） | 是 |
+| `procedure` | 程序性记忆：存「某个 App 在什么环境下怎么操作」，注入索引、按需查询 | 是 |
+| `watch` | 持续监控：会话内定时巡检，每周期自动触发一轮 agent 行动 | 是 |
+
+**Computer Use（视觉 + 控件树双通道）**
 
 | 工具 | 说明 |
 | --- | --- |
 | `screenshot` | 截屏返回 JPEG + 尺寸；图片左上角即 `(0,0)`，harness 不做坐标换算 |
 | `computer` | click / doubleClick / rightClick / type / hotkey / scroll / drag / focus 八个动作，坐标必须来自最近一次截图 |
+| `uia_tree` | 读取桌面应用控件树（Windows UIA / macOS AX）：按控件点而非看图猜坐标，视觉通道兜底 |
 
-Windows 后端：PowerShell + System.Drawing / user32 P/Invoke，多显示器并集 + 高 DPI 处理；
-macOS 后端：`screencapture` + JXA ObjC bridge 发 CGEvent。两端均零 npm 依赖。
+Windows 后端：PowerShell + System.Drawing / UIAutomationClient / user32 P/Invoke，多显示器并集 + 高 DPI 处理；
+macOS 后端：`screencapture` + JXA ObjC bridge 发 CGEvent（仅主显示器）。两端均零 npm 依赖。
 历史截图会被上下文压缩替换成占位文本（需要时重新截屏），这是有意行为。
+
+**手机（adb 文本通道，Android）**
+
+| 工具 | 说明 |
+| --- | --- |
+| `mobile_screen` | 截取 Android 设备画面（adb screencap），返回 PNG + 屏幕尺寸 |
+| `mobile_ui` | 读取控件树（uiautomator dump），带 bounds 中心坐标——手机 GUI 的文本通道 |
+| `mobile_act` | tap / swipe / text / key / start 五个动作，支持真机与模拟器（MuMu/雷电/夜神/蓝叠）多 adb 入口 |
+| `phone_panel` | 桌面端内嵌手机镜像面板的开/关/查询（约 1.7fps 实时画面） |
 
 **浏览器（内部面板，结构化通道）**
 
 `browser_navigate` `browser_read` `browser_screenshot` `browser_evaluate` `browser_input`
-`browser_network` `browser_tabs` `browser_wait` `browser_intercept` —— DOM 级读写、CDP 受信输入、
-多标签、抓包/拦截、登录态持久，不弹外部窗口。
+`browser_network` `browser_tabs` `browser_wait` `browser_intercept` `browser_cookie` `browser_file` —— DOM 级读写、CDP 受信输入、
+多标签、抓包/拦截、Cookie 注入与清理、文件上传/下载记录、登录态持久，不弹外部窗口。
 
 **其他**：`ask_user`（模型 → 用户提问通道）。
 
@@ -180,7 +203,7 @@ src/
   agent/             唯一调度状态机（agent.ts + convert.ts）
   context/           会话树、transformContext、指令队列、会话持久化
   providers/         模型适配器 + 厂商预设（缺 key 降级 mock）
-  tools/             19 个内置工具（含 Computer Use 与浏览器工具族）
+  tools/             28 个内置工具（含 Computer Use、UIA、手机与浏览器工具族）
   connector/         Connector 插件运行时（Loader → Registry → Runtime）
   cron/              定时任务：解析 / 调度 / 持久化 / 无头执行
   bot/               微信 Bot：per-chat 会话落盘续聊
@@ -214,7 +237,7 @@ browser-use 兜底通道），不显式点名就不加载。
 ## 测试
 
 ```bash
-npm test             # 272 个用例
+npm test             # 308 个用例
 npm run typecheck    # tsc --noEmit
 npm run typecheck:desktop
 ```

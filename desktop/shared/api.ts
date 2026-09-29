@@ -199,7 +199,8 @@ export interface ToolEntry {
 export type ToolsByCategory = Record<ToolCategory, ToolEntry[]>;
 
 /**
- * 运行模式（v1 仅 UI 持久化；agent 调度层暂不消费，待下一轮真接入）。
+ * 运行模式（桌面端 setMode 已接入 agent 调度层：mode 决定下一轮新建 Agent
+ * 的工具表与系统提示词追加段，见 desktop/main/session.ts 的 setMode）。
  *  - answer_only：仅基于上下文回答，不让 agent 调任何 tool
  *  - plan：先给计划再执行
  *  - full：默认，agent 自决

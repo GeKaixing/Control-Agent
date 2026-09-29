@@ -1,8 +1,8 @@
 /**
  * screenshot 工具：截取当前屏幕，返回 JPEG 截图（dataUrl）+ 元信息。
  * Computer Use 通道的感知端：模型直接看图输出像素坐标（相对截图左上角），
- * harness 不做坐标换算；接 UI-TARS 系模型（smart_resize 坐标系）时的换算
- * 另行处理（见 AGENTS.md「Computer Use」）。
+ * harness 不做坐标换算；UI-TARS 系模型（smart_resize 坐标系）的换算在
+ * uitars-coords.ts，由 computer 的 uitarsBox 参数消费（见 AGENTS.md）。
  *
  * 平台后端（均零 npm 依赖）：
  * - Windows：PowerShell + System.Drawing，覆盖多显示器并集，物理像素 1:1。
@@ -16,6 +16,12 @@ import { promisify } from "node:util";
 import type { Tool } from "./types.js";
 import { fail, okImage } from "./types.js";
 import { captureMainDisplay } from "./darwin-cu.js";
+
+/**
+ * 最近一次成功截图的尺寸（模块级共享，computer 的 uitarsBox 换算要读）。
+ * 没截过图时为 0——此时 uitarsBox 参数 fail 并提示先 screenshot。
+ */
+export const lastScreenshot = { w: 0, h: 0 };
 
 const execFileAsync = promisify(execFile);
 
@@ -95,6 +101,8 @@ export const screenshotTool: Tool = {
     if (process.platform === "darwin") {
       try {
         const shot = await captureMainDisplay(ctx.signal);
+        lastScreenshot.w = shot.w;
+        lastScreenshot.h = shot.h;
         return okImage(
           shot.dataUrl,
           `屏幕截图 ${shot.w}x${shot.h}（主显示器；坐标以图片左上角为 (0,0)。` +

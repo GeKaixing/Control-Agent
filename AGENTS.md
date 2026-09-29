@@ -52,12 +52,18 @@
   「不可逆操作过人」的直接案例，不要为了"流畅"给它开后门。
 - **Context 成本**：一张截图约 1.5K token。`transformContext` 压缩旧轮次时会把
   历史截图替换成占位文本（需要时重新 screenshot）——这是有意行为，不要"修复"它。
-- **坐标算法基准**：若未来接入 UI-TARS 系模型（其输出在 smart_resize 坐标系，
-  而非截图原始像素），坐标换算必须以对拍验证过的复刻实现为准（对拍 34/34：
-  `.workbuddy/tmp/uitars/uitars-coords.ts` 对齐 `bytedance/UI-TARS`
-  `codes/ui_tars/action_parser.py`；正式启用前迁入 `src/tools/` 并补单测）。
+- **坐标算法基准**：接入 UI-TARS 系模型（其输出在 smart_resize 坐标系，
+  而非截图原始像素）时，坐标换算用 `src/tools/uitars-coords.ts`（单测
+  `tests/uitars-coords.ts`；基准 `bytedance/UI-TARS` `codes/ui_tars/action_parser.py`，
+  早期的 tmp 对拍副本已随临时目录清理，语义由单测固化）。已接线：`computer`
+  的 `uitarsBox`/`uitarsBox2` 参数自动换算（screenshot 模块记录最近截图尺寸），
+  模型直接传原始坐标框即可，无需自己调换算函数。
   三个坑：像素预算须与推理端一致、Python round 是银行家舍入、
   原版 `origin_resized_*` 参数实际要传原始分辨率。
+- **iOS 通道（规划中，未实现）**：mobile_* 目前仅 Android（adb）。iOS 走 WDA
+  （WebDriverAgent，非越狱官方通道）与现有三件套对称——路线图、API 对照、分阶段
+  实施与已知限制见 [docs/ios-roadmap.md](docs/ios-roadmap.md)。动手前先读完它，
+  特别是 points 坐标系与签名 7 天过期两处。
 
 ## 这是什么
 

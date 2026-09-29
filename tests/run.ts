@@ -96,6 +96,7 @@ import "./bot-weixin.js";
 import "./log.js";
 import "./cron.js";
 import "./channels.js";
+import "./uitars-coords.js";
 
 const noSignal = (): AbortSignal => new AbortController().signal;
 
